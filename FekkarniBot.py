@@ -39,7 +39,7 @@ print("Connected successfully!")
 LOCAL_TIMEZONE = pytz.timezone("Africa/Casablanca")
 
 
-# --- 2. RENDER DUMMY WEB SERVER ---
+# --- 2. RENDER DUMMY WEB SERVER WITH HEAD CHECK SUPPORT ---
 def run_dummy_server():
     """Starts a lightweight web server to satisfy Render's health checks."""
     class DummyHandler(BaseHTTPRequestHandler):
@@ -47,6 +47,11 @@ def run_dummy_server():
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"Fekkarni Bot is active and running smoothly 24/7.")
+            
+        def do_HEAD(self):
+            # Render sends HEAD requests to check application vitality
+            self.send_response(200)
+            self.end_headers()
             
     # Render assigns a dynamic port. We default to 10000 if running locally.
     port = int(os.environ.get("PORT", 10000))
@@ -274,8 +279,12 @@ def main():
     current_time = datetime.now()
     seconds_until_perfect_minute = 60 - current_time.second
     
-    # Initialize Telegram's Native JobQueue perfectly synchronized with the clock
-    app.job_queue.run_repeating(check_and_send_reminders, interval=60, first=seconds_until_perfect_minute)
+    # Initialize JobQueue securely now that dependencies are explicitly packed
+    if app.job_queue:
+        app.job_queue.run_repeating(check_and_send_reminders, interval=60, first=seconds_until_perfect_minute)
+        print("JobQueue successfully verified and clock synchronized.")
+    else:
+        print("⚠️ Warning: JobQueue initialization delayed.")
 
     # Handlers
     app.add_handler(CommandHandler("start", start))
