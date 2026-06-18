@@ -1,6 +1,7 @@
 python-telegram-bot
+apscheduler
+google-generativeai
 gspread
 oauth2client
 python-dotenv
-google-generativeai
 pytz
