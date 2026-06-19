@@ -273,15 +273,21 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     
-    try:
+try:
         # 1. Download the voice note from Telegram
         voice_file_info = await context.bot.get_file(update.message.voice.file_id)
         await voice_file_info.download_to_drive(temp_file_path)
         
-        # 2. Upload to Gemini securely in the background
-        audio_file = await asyncio.to_thread(genai.upload_file, path=temp_file_path, mime_type="audio/ogg")
+        # 2. Read the audio bytes directly into memory (Bypasses the broken File API!)
+        with open(temp_file_path, "rb") as f:
+            audio_bytes = f.read()
+            
+        audio_part = {
+            "mime_type": "audio/ogg",
+            "data": audio_bytes
+        }
         
-        # 3. Process the audio with AI
+        # 3. Process the audio with AI directly
         now_local = datetime.now(LOCAL_TIMEZONE)
         current_date_str = now_local.strftime("%Y-%m-%d")
         current_time_str = now_local.strftime("%H:%M")
@@ -302,18 +308,15 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
         """
         
-        # We pass the audio file and the prompt together to Gemini
+        # Pass the memory data directly instead of an uploaded file link
         response = await ai_model.generate_content_async(
-            contents=[audio_file, system_prompt],
+            contents=[audio_part, system_prompt],
             generation_config={"response_mime_type": "application/json"}
         )
         
         task_data = json.loads(response.text)
         
-        # 4. Clean up the file from Google's servers to save space
-        await asyncio.to_thread(genai.delete_file, audio_file.name)
-        
-        # 5. Save to Google Sheets
+        # 4. Save to Google Sheets
         task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S")
         task_name = task_data.get("task_name", "Untitled Task")
         target_date = task_data.get("date", "Unknown")
@@ -324,7 +327,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
         await asyncio.to_thread(sheet.append_row, row_to_add)
         
-        # 6. Send Confirmation
+        # 5. Send Confirmation
         confirmation = (
             f"🎙️ **Voice Task Saved!**\n\n"
             f"📌 **Task:** {task_name}\n"
@@ -334,7 +337,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🔁 **Repeat:** {recurrence}\n"
         )
         await update.message.reply_text(confirmation, parse_mode="Markdown")
-        
+    
     except Exception as e:
         # Adding flush=True forces Render to print this immediately
         print(f"Voice parse error: {e}", flush=True) 
