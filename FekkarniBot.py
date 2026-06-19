@@ -273,7 +273,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     
-try:
+    try:
         # 1. Download the voice note from Telegram
         voice_file_info = await context.bot.get_file(update.message.voice.file_id)
         await voice_file_info.download_to_drive(temp_file_path)
