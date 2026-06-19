@@ -344,8 +344,17 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             os.remove(temp_file_path)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Fekkarni Bot is fully online! Send me a reminder anytime.")
-
+    welcome_text = (
+        "👋 **Welcome to Fekkarni!** Your personal AI memory assistant.\n\n"
+        "I am here to make sure you never forget a task, appointment, or idea.\n\n"
+        "**How to use me:**\n"
+        "Just talk to me naturally! You can type or send a voice note.\n"
+        "Try saying something like:\n"
+        "• _'Remind me to call the client tomorrow at 10 AM'_\n"
+        "• _'Every Friday at 4 PM remind me to check the budget'_\n\n"
+        "Send me your first task right now to test it out!"
+    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 # --- 7. ENGINE RUNNER ---
 def main():
