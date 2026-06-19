@@ -38,7 +38,6 @@ LOCAL_TIMEZONE = pytz.timezone("Africa/Casablanca")
 
 # --- SECURITY SANITIZER ---
 def sanitize_error(error_msg: Exception) -> str:
-    """Scans error messages and redacts sensitive API keys before displaying them."""
     safe_text = str(error_msg)
     if GEMINI_API_KEY and GEMINI_API_KEY in safe_text:
         safe_text = safe_text.replace(GEMINI_API_KEY, "********[REDACTED_API_KEY]********")
@@ -98,6 +97,7 @@ async def parse_task_with_ai(user_text: str, draft_context: str = "") -> list:
     2. If the user does NOT specify a date, output "Unknown".
     3. If the user does NOT specify a time, output "Unknown".
     4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
+    5. If intent is "complete" or "cancel", extract ONLY the core identifying keywords for the `task_name`. Completely remove filler words like "task", "reminder", "the", "my".
     
     Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
     """
@@ -238,7 +238,6 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             env_file.write(f"\nCHAT_ID={chat_id}")
         os.environ["CHAT_ID"] = chat_id
 
-    # 1. CUSTOM DELAY LOGIC
     if 'pending_delay_row' in context.user_data:
         physical_row = context.user_data.pop('pending_delay_row')
         msg_id = context.user_data.pop('pending_delay_msg_id')
@@ -262,22 +261,18 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Could not parse time window. Please try again with a simple entry like '45m'.")
         return 
 
-    # 2. CHECK FOR MISSING TIME DRAFT
     draft_context = ""
     if 'draft_task_name' in context.user_data:
         draft_name = context.user_data.pop('draft_task_name')
         draft_context = f"\nCRITICAL: The user is clarifying the time for a previous task: '{draft_name}'. Keep this task name and extract the new date/time from the text."
 
-    # 3. STANDARD PARSING
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         task_list = await parse_task_with_ai(user_text, draft_context)
-        
         if isinstance(task_list, dict):
             task_list = [task_list]
             
         response_messages = []
-        
         for task_data in task_list:
             intent = task_data.get("intent", "create")
             task_name = task_data.get("task_name", "Untitled Task")
@@ -286,17 +281,25 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
                 names_col = await asyncio.to_thread(sheet.col_values, 2)
                 status_col = await asyncio.to_thread(sheet.col_values, 6)
                 
+                # --- FUZZY SEARCH UPGRADE ---
                 target_name_lower = task_name.lower()
+                clean_target = target_name_lower.replace("task", "").replace("reminder", "").replace("the", "").replace("my", "").strip()
+                target_words = [w for w in clean_target.split() if len(w) > 2] # Only search meaningful keywords
+                
                 found_row = None
                 actual_name = ""
                 
                 for i in range(1, len(names_col)):
                     status = status_col[i] if i < len(status_col) else ""
-                    if str(status).strip() == "Active" and target_name_lower in str(names_col[i]).lower():
-                        found_row = i + 1
-                        actual_name = names_col[i]
-                        break
-                        
+                    sheet_name_lower = str(names_col[i]).lower()
+                    
+                    if str(status).strip() == "Active":
+                        # Match if the exact phrase is found, OR if all the key words are found scattered in the name
+                        if clean_target in sheet_name_lower or (target_words and all(w in sheet_name_lower for w in target_words)):
+                            found_row = i + 1
+                            actual_name = names_col[i]
+                            break
+                            
                 if found_row:
                     new_status = "Completed" if intent == "complete" else "Cancelled"
                     await asyncio.to_thread(sheet.update_cell, found_row, 6, new_status)
@@ -401,6 +404,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         2. If the user does NOT specify a date, output "Unknown".
         3. If the user does NOT specify a time, output "Unknown".
         4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
+        5. If intent is "complete" or "cancel", extract ONLY the core identifying keywords for the `task_name`. Completely remove filler words like "task", "reminder", "the", "my".
         
         Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
         """
@@ -422,33 +426,33 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             task_name = task_data.get("task_name", "Untitled Task")
             
             if intent in ["complete", "cancel"]:
-                all_records = await asyncio.to_thread(sheet.get_all_records)
+                names_col = await asyncio.to_thread(sheet.col_values, 2)
+                status_col = await asyncio.to_thread(sheet.col_values, 6)
+                
+                # --- FUZZY SEARCH UPGRADE ---
                 target_name_lower = task_name.lower()
-                task_id_to_update = None
+                clean_target = target_name_lower.replace("task", "").replace("reminder", "").replace("the", "").replace("my", "").strip()
+                target_words = [w for w in clean_target.split() if len(w) > 2]
+                
+                found_row = None
                 actual_name = ""
                 
-                for row in all_records:
-                    if str(row.get('Status', '')).strip() == "Active" and target_name_lower in str(row.get('Task Name', '')).lower():
-                        task_id_to_update = str(row.get('Task ID', ''))
-                        actual_name = row.get('Task Name', '')
-                        break
-                        
-                if task_id_to_update:
-                    col_ids = await asyncio.to_thread(sheet.col_values, 1)
-                    physical_row = None
-                    for i, val in enumerate(col_ids):
-                        if str(val).strip().lstrip('0') == str(task_id_to_update).lstrip('0'):
-                            physical_row = i + 1
+                for i in range(1, len(names_col)):
+                    status = status_col[i] if i < len(status_col) else ""
+                    sheet_name_lower = str(names_col[i]).lower()
+                    
+                    if str(status).strip() == "Active":
+                        if clean_target in sheet_name_lower or (target_words and all(w in sheet_name_lower for w in target_words)):
+                            found_row = i + 1
+                            actual_name = names_col[i]
                             break
                             
-                    if physical_row:
-                        new_status = "Completed" if intent == "complete" else "Cancelled"
-                        await asyncio.to_thread(sheet.update_cell, physical_row, 6, new_status)
-                        response_messages.append(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
-                    else:
-                        response_messages.append("❌ Error syncing with dashboard. Task not found in Column A.")
+                if found_row:
+                    new_status = "Completed" if intent == "complete" else "Cancelled"
+                    await asyncio.to_thread(sheet.update_cell, found_row, 6, new_status)
+                    response_messages.append(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
                 else:
-                    response_messages.append(f"❌ I couldn't find an active task matching '{task_name}' in your agenda.")
+                    response_messages.append(f"❌ Couldn't find active task matching '{task_name}'.")
                 continue
                 
             task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S%f")[:8]
@@ -506,7 +510,7 @@ async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         if not todays_tasks:
-            await update.message.reply_text("🎉 You have no remaining tasks for today! Enjoy your free time, Youness.")
+            await update.message.reply_text("🎉 You have no remaining tasks for today! Enjoy your free time.")
             return
             
         todays_tasks.sort(key=lambda x: str(x.get('Time', '23:59')))
