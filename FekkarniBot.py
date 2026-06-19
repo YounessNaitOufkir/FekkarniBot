@@ -77,15 +77,22 @@ async def parse_task_with_ai(user_text: str) -> dict:
     You are a precise data extraction engine for a personal task manager bot.
     The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
     
-    Analyze the incoming user message. Extract the following data fields and return them strictly as a JSON object:
-    - intent: Use "create" if they are adding a new task. Use "complete" if finishing a task. Use "cancel" if stopping a task.
-    - task_name: A clear title of the task to create, complete, or cancel.
-    - date: The target date for the reminder in YYYY-MM-DD format. Default to 'Unknown'.
-    - time: The target time in 24-hour HH:MM format. CRITICAL RULE: If the user provides a time range (e.g., "between 5 and 6" or "around 5:30 and 6:30"), you MUST randomly pick ONE specific minute inside that range (e.g., "17:42") and output ONLY that specific time. Never output a range.
-    - duration: The estimated duration mentioned. Default to 'Unknown'.
-    - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
+    Analyze the incoming user message. The user might mention MULTIPLE tasks in one message.
+    Extract the data fields and return them strictly as a JSON ARRAY of objects, even if there is only one task.
+    Format exactly like this:
+    [
+      {{
+        "intent": "create", "complete", or "cancel",
+        "task_name": "A clear title",
+        "date": "YYYY-MM-DD",
+        "time": "HH:MM",
+        "duration": "Unknown",
+        "recurrence": "None"
+      }}
+    ]
 
-    Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
+    CRITICAL RULE FOR TIME: If the user provides a time range, you MUST randomly pick ONE specific minute.
+    Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
     """
     
     response = await ai_model.generate_content_async(
@@ -226,6 +233,7 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             env_file.write(f"\nCHAT_ID={chat_id}")
         os.environ["CHAT_ID"] = chat_id
 
+    # 1. RESTORED CUSTOM DELAY LOGIC
     if 'pending_delay_row' in context.user_data:
         physical_row = context.user_data.pop('pending_delay_row')
         msg_id = context.user_data.pop('pending_delay_msg_id')
@@ -245,82 +253,66 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             
             await update.message.reply_text(f"🔄 Custom delay set! Moved to {new_target.strftime('%H:%M')}.")
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
-        except:
+        except Exception as e:
             await update.message.reply_text("Could not parse time window. Please try again with a simple entry like '45m'.")
-        return
+        return # CRITICAL: Stop the bot from reading this delay as a new task!
 
-    if 'draft_task_name' in context.user_data:
-        draft_name = context.user_data.pop('draft_task_name')
-        user_text = f"The task is: '{draft_name}'. The date and time is: {user_text}"
-
+    # 2. Standard task parsing
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        task_data = await parse_task_with_ai(user_text)
-        intent = task_data.get("intent", "create")
-        task_name = task_data.get("task_name", "Untitled Task")
+        task_list = await parse_task_with_ai(user_text)
         
-        # Intent Router (Updates existing tasks robustly)
-        if intent in ["complete", "cancel"]:
-            all_records = await asyncio.to_thread(sheet.get_all_records)
-            target_name_lower = task_name.lower()
-            task_id_to_update = None
-            actual_name = ""
+        if isinstance(task_list, dict):
+            task_list = [task_list]
             
-            for row in all_records:
-                if str(row.get('Status', '')).strip() == "Active" and target_name_lower in str(row.get('Task Name', '')).lower():
-                    task_id_to_update = str(row.get('Task ID', ''))
-                    actual_name = row.get('Task Name', '')
-                    break
-                    
-            if task_id_to_update:
-                col_ids = await asyncio.to_thread(sheet.col_values, 1)
-                physical_row = None
-                for i, val in enumerate(col_ids):
-                    if str(val).strip().lstrip('0') == str(task_id_to_update).lstrip('0'):
-                        physical_row = i + 1
+        response_messages = []
+        
+        for task_data in task_list:
+            intent = task_data.get("intent", "create")
+            task_name = task_data.get("task_name", "Untitled Task")
+            
+            if intent in ["complete", "cancel"]:
+                names_col = await asyncio.to_thread(sheet.col_values, 2)
+                status_col = await asyncio.to_thread(sheet.col_values, 6)
+                
+                target_name_lower = task_name.lower()
+                found_row = None
+                actual_name = ""
+                
+                for i in range(1, len(names_col)):
+                    status = status_col[i] if i < len(status_col) else ""
+                    if str(status).strip() == "Active" and target_name_lower in str(names_col[i]).lower():
+                        found_row = i + 1
+                        actual_name = names_col[i]
                         break
                         
-                if physical_row:
+                if found_row:
                     new_status = "Completed" if intent == "complete" else "Cancelled"
-                    await asyncio.to_thread(sheet.update_cell, physical_row, 6, new_status)
-                    await update.message.reply_text(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+                    await asyncio.to_thread(sheet.update_cell, found_row, 6, new_status)
+                    response_messages.append(f"✅ Marked **{actual_name}** as {new_status}.")
                 else:
-                    await update.message.reply_text("❌ Error syncing with dashboard. Task not found in Column A.")
-            else:
-                await update.message.reply_text(f"❌ I couldn't find an active task matching '{task_name}' in your agenda.")
-            return
+                    response_messages.append(f"❌ Couldn't find active task matching '{task_name}'.")
+                continue 
             
-        task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%d%H%M%S")
-        target_date = task_data.get("date", "Unknown")
-        target_time = task_data.get("time", "Unknown")
-        duration = task_data.get("duration", "Unknown")
-        recurrence = task_data.get("recurrence", "None")
-        needs_clarification = task_data.get("needs_clarification", False)
-        
-        if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
-            context.user_data['draft_task_name'] = task_name
-            await update.message.reply_text(f"📌 I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
-            return
-        
-        row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
-        await asyncio.to_thread(sheet.append_row, row_to_add)
-        
-        confirmation = (
-            f"✅ **Task Saved!**\n\n"
-            f"📌 **Task:** {task_name}\n"
-            f"📅 **Date:** {target_date}\n"
-            f"🕒 **Time:** {target_time}\n"
-            f"⏳ **Duration:** {duration}\n"
-            f"🔁 **Repeat:** {recurrence}\n"
-        )
-        await update.message.reply_text(confirmation, parse_mode="Markdown")
-        
+            task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S%f")[:8]
+            target_date = task_data.get("date", "Unknown")
+            target_time = task_data.get("time", "Unknown")
+            duration = task_data.get("duration", "Unknown")
+            recurrence = task_data.get("recurrence", "None")
+            
+            row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
+            await asyncio.to_thread(sheet.append_row, row_to_add)
+            
+            response_messages.append(f"✅ **Saved:** {task_name} 📅 {target_date} 🕒 {target_time}")
+            
+        await update.message.reply_text("\n\n".join(response_messages), parse_mode="Markdown")
+
     except Exception as e:
-        print(f"Parse error: {e}", flush=True) 
-        safe_error = sanitize_error(e) 
+        print(f"Parse error: {e}", flush=True)
+        safe_error = sanitize_error(e) # ADDED SANITIZER HERE
         error_message = (
             f"❌ Sorry, I had trouble parsing that task.\n\n"
-            f"🛠️ **Debug Info:**\n`{safe_error}`"
+            f"🛠️ **Debug Info for Youness:**\n`{safe_error}`"
         )
         await update.message.reply_text(error_message, parse_mode="Markdown")
 
@@ -361,85 +353,93 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             draft_context = f"\nCRITICAL: The user is clarifying the time for a previous task: '{draft_name}'. Keep this task name and extract the new date/time from the audio."
 
         system_prompt = f"""
-        You are a precise data extraction engine for a personal task manager bot.
-        The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+    You are a precise data extraction engine for a personal task manager bot.
+    The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+    {draft_context}
     
-        Analyze the incoming user message. Extract the following data fields and return them strictly as a JSON object:
-        - intent: Use "create" if they are adding a new task. Use "complete" if finishing a task. Use "cancel" if stopping a task.
-        - task_name: A clear title of the task to create, complete, or cancel.
-        - date: The target date for the reminder in YYYY-MM-DD format. Default to 'Unknown'.
-        - time: The target time in 24-hour HH:MM format. CRITICAL RULE: If the user provides a time range (e.g., "between 5 and 6" or "around 5:30 and 6:30"), you MUST randomly pick ONE specific minute inside that range (e.g., "17:42") and output ONLY that specific time. Never output a range.
-        - duration: The estimated duration mentioned. Default to 'Unknown'.
-        - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
+    Analyze the incoming user message. The user might mention MULTIPLE tasks in one message.
+    Extract the data fields and return them strictly as a JSON ARRAY of objects, even if there is only one task.
+    Format exactly like this:
+    [
+      {{
+        "intent": "create", "complete", or "cancel",
+        "task_name": "A clear title",
+        "date": "YYYY-MM-DD",
+        "time": "HH:MM",
+        "duration": "Unknown",
+        "recurrence": "None"
+      }}
+    ]
 
-        Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
-        {draft_context}
-        """
+    CRITICAL RULE FOR TIME: If the user provides a time range, you MUST randomly pick ONE specific minute.
+    Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
+    """
         
         response = await ai_model.generate_content_async(
             contents=[audio_part, system_prompt],
             generation_config={"response_mime_type": "application/json"}
         )
         
-        task_data = json.loads(response.text)
-        intent = task_data.get("intent", "create")
-        task_name = task_data.get("task_name", "Untitled Task")
+        task_list = json.loads(response.text)
         
-        # Intent Router (Updates existing tasks robustly)
-        if intent in ["complete", "cancel"]:
-            all_records = await asyncio.to_thread(sheet.get_all_records)
-            target_name_lower = task_name.lower()
-            task_id_to_update = None
-            actual_name = ""
+        # LOOP ADDED FOR VOICE BATCH PROCESSING
+        if isinstance(task_list, dict):
+            task_list = [task_list]
             
-            for row in all_records:
-                if str(row.get('Status', '')).strip() == "Active" and target_name_lower in str(row.get('Task Name', '')).lower():
-                    task_id_to_update = str(row.get('Task ID', ''))
-                    actual_name = row.get('Task Name', '')
-                    break
-                    
-            if task_id_to_update:
-                col_ids = await asyncio.to_thread(sheet.col_values, 1)
-                physical_row = None
-                for i, val in enumerate(col_ids):
-                    if str(val).strip().lstrip('0') == str(task_id_to_update).lstrip('0'):
-                        physical_row = i + 1
+        response_messages = []
+        
+        for task_data in task_list:
+            intent = task_data.get("intent", "create")
+            task_name = task_data.get("task_name", "Untitled Task")
+            
+            if intent in ["complete", "cancel"]:
+                all_records = await asyncio.to_thread(sheet.get_all_records)
+                target_name_lower = task_name.lower()
+                task_id_to_update = None
+                actual_name = ""
+                
+                for row in all_records:
+                    if str(row.get('Status', '')).strip() == "Active" and target_name_lower in str(row.get('Task Name', '')).lower():
+                        task_id_to_update = str(row.get('Task ID', ''))
+                        actual_name = row.get('Task Name', '')
                         break
                         
-                if physical_row:
-                    new_status = "Completed" if intent == "complete" else "Cancelled"
-                    await asyncio.to_thread(sheet.update_cell, physical_row, 6, new_status)
-                    await update.message.reply_text(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+                if task_id_to_update:
+                    col_ids = await asyncio.to_thread(sheet.col_values, 1)
+                    physical_row = None
+                    for i, val in enumerate(col_ids):
+                        if str(val).strip().lstrip('0') == str(task_id_to_update).lstrip('0'):
+                            physical_row = i + 1
+                            break
+                            
+                    if physical_row:
+                        new_status = "Completed" if intent == "complete" else "Cancelled"
+                        await asyncio.to_thread(sheet.update_cell, physical_row, 6, new_status)
+                        response_messages.append(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+                    else:
+                        response_messages.append("❌ Error syncing with dashboard. Task not found in Column A.")
                 else:
-                    await update.message.reply_text("❌ Error syncing with dashboard. Task not found in Column A.")
-            else:
-                await update.message.reply_text(f"❌ I couldn't find an active task matching '{task_name}' in your agenda.")
-            return
-            
-        task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%d%H%M%S")
-        target_date = task_data.get("date", "Unknown")
-        target_time = task_data.get("time", "Unknown")
-        duration = task_data.get("duration", "Unknown")
-        recurrence = task_data.get("recurrence", "None")
-        needs_clarification = task_data.get("needs_clarification", False)
+                    response_messages.append(f"❌ I couldn't find an active task matching '{task_name}' in your agenda.")
+                continue
+                
+            task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S%f")[:8]
+            target_date = task_data.get("date", "Unknown")
+            target_time = task_data.get("time", "Unknown")
+            duration = task_data.get("duration", "Unknown")
+            recurrence = task_data.get("recurrence", "None")
+            needs_clarification = task_data.get("needs_clarification", False)
 
-        if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
-            context.user_data['draft_task_name'] = task_name
-            await update.message.reply_text(f"🎙️ I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
-            return
-        
-        row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
-        await asyncio.to_thread(sheet.append_row, row_to_add)
-        
-        confirmation = (
-            f"🎙️ **Voice Task Saved!**\n\n"
-            f"📌 **Task:** {task_name}\n"
-            f"📅 **Date:** {target_date}\n"
-            f"🕒 **Time:** {target_time}\n"
-            f"⏳ **Duration:** {duration}\n"
-            f"🔁 **Repeat:** {recurrence}\n"
-        )
-        await update.message.reply_text(confirmation, parse_mode="Markdown")
+            if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
+                context.user_data['draft_task_name'] = task_name
+                response_messages.append(f"🎙️ I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
+                continue
+            
+            row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
+            await asyncio.to_thread(sheet.append_row, row_to_add)
+            
+            response_messages.append(f"🎙️ **Voice Task Saved:** {task_name} 📅 {target_date} 🕒 {target_time}")
+            
+        await update.message.reply_text("\n\n".join(response_messages), parse_mode="Markdown")
         
     except Exception as e:
         print(f"Voice parse error: {e}", flush=True) 
