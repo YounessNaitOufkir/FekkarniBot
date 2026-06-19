@@ -116,7 +116,6 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
         today_str = now_local.strftime("%Y-%m-%d")
         time_str = now_local.strftime("%H:%M")
         
-        # Wrapped in asyncio to prevent the bot from freezing
         all_records = await asyncio.to_thread(sheet.get_all_records)
         
         for index, row in enumerate(all_records, start=2):
@@ -169,7 +168,6 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
     action = data_parts[0]
     task_id = data_parts[1]
     
-    # Bulletproof physical row lookup (ignores layout changes)
     col_ids = await asyncio.to_thread(sheet.col_values, 1)
     physical_row = None
     for i, val in enumerate(col_ids):
@@ -231,64 +229,6 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # --- TEXT HANDLER ---
-async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    chat_id = str(update.effective_chat.id)
-    
-    if os.getenv("CHAT_ID") != chat_id:
-        with open(".env", "a") as env_file:
-            env_file.write(f"\nCHAT_ID={chat_id}")
-        os.environ["CHAT_ID"] = chat_id
-
-    # 1. RESTORED CUSTOM DELAY LOGIC
-    if 'pending_delay_row' in context.user_data:
-        physical_row = context.user_data.pop('pending_delay_row')
-        msg_id = context.user_data.pop('pending_delay_msg_id')
-        
-        ai_prompt = f"Extract the numeric duration in total minutes from this text: '{user_text}'. Respond with ONLY an integer number."
-        response = await ai_model.generate_content_async(ai_prompt)
-        ai_res = response.text.strip()
-        
-        try:
-            minutes_to_add = int(ai_res)
-            now_local = datetime.now(LOCAL_TIMEZONE)
-            new_target = now_local + timedelta(minutes=minutes_to_add)
-            
-            await asyncio.to_thread(sheet.update_cell, physical_row, 3, new_target.strftime("%Y-%m-%d"))
-            await asyncio.to_thread(sheet.update_cell, physical_row, 4, new_target.strftime("%H:%M"))
-            await asyncio.to_thread(sheet.update_cell, physical_row, 6, "Active")
-            
-            await update.message.reply_text(f"🔄 Custom delay set! Moved to {new_target.strftime('%H:%M')}.")
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
-        except Exception as e:
-            await update.message.reply_text("Could not parse time window. Please try again with a simple entry like '45m'.")
-        return # CRITICAL: Stop the bot from reading this delay as a new task!
-
-    # 2. Standard task parsing
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    try:
-        task_list = await parse_task_with_ai(user_text)
-        
-        if isinstance(task_list, dict):
-            task_list = [task_list]
-            
-        response_messages = []
-        
-        for task_data in task_list:
-            intent = task_data.get("intent", "create")
-            task_name = task_data.get("task_name", "Untitled Task")
-            
-            if intent in ["complete", "cancel"]:
-                names_col = await asyncio.to_thread(sheet.col_values, 2)
-                status_col = await asyncio.to_thread(sheet.col_values, 6)
-                
-                target_name_lower = task_name.lower()
-                found_row = None
-                actual_name = ""
-                
-                for i in range(1, len(names_col)):
-                    status = status_col[i] if i < len(status_col) else ""
-                    if str(status).stri# --- TEXT HANDLER ---
 async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = str(update.effective_chat.id)
@@ -372,7 +312,6 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             recurrence = task_data.get("recurrence", "None")
             needs_clarification = task_data.get("needs_clarification", False)
             
-            # Bulletproof check for missing information
             is_missing = (
                 needs_clarification == True or 
                 target_date.lower() in ["unknown", "none", "null", ""] or 
@@ -519,7 +458,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             recurrence = task_data.get("recurrence", "None")
             needs_clarification = task_data.get("needs_clarification", False)
 
-            # Bulletproof check for missing information
             is_missing = (
                 needs_clarification == True or 
                 target_date.lower() in ["unknown", "none", "null", ""] or 
