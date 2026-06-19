@@ -67,7 +67,7 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 
 
 # --- AI PARSING ENGINE ---
-async def parse_task_with_ai(user_text: str) -> dict:
+async def parse_task_with_ai(user_text: str, draft_context: str = "") -> list:
     now_local = datetime.now(LOCAL_TIMEZONE)
     current_date_str = now_local.strftime("%Y-%m-%d")
     current_time_str = now_local.strftime("%H:%M")
@@ -76,8 +76,9 @@ async def parse_task_with_ai(user_text: str) -> dict:
     system_prompt = f"""
     You are a precise data extraction engine for a personal task manager bot.
     The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+    {draft_context}
     
-    Analyze the incoming user message. The user might mention MULTIPLE tasks in one message.
+    Analyze the incoming user message. The user might mention MULTIPLE tasks.
     Extract the data fields and return them strictly as a JSON ARRAY of objects, even if there is only one task.
     Format exactly like this:
     [
@@ -87,11 +88,17 @@ async def parse_task_with_ai(user_text: str) -> dict:
         "date": "YYYY-MM-DD",
         "time": "HH:MM",
         "duration": "Unknown",
-        "recurrence": "None"
+        "recurrence": "None",
+        "needs_clarification": false
       }}
     ]
 
-    CRITICAL RULE FOR TIME: If the user provides a time range, you MUST randomly pick ONE specific minute.
+    CRITICAL RULES:
+    1. If a time range is given, pick ONE specific minute.
+    2. If the user does NOT specify a date, output "Unknown".
+    3. If the user does NOT specify a time, output "Unknown".
+    4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
+    
     Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
     """
     
@@ -281,6 +288,70 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
                 
                 for i in range(1, len(names_col)):
                     status = status_col[i] if i < len(status_col) else ""
+                    if str(status).stri# --- TEXT HANDLER ---
+async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    chat_id = str(update.effective_chat.id)
+    
+    if os.getenv("CHAT_ID") != chat_id:
+        with open(".env", "a") as env_file:
+            env_file.write(f"\nCHAT_ID={chat_id}")
+        os.environ["CHAT_ID"] = chat_id
+
+    # 1. CUSTOM DELAY LOGIC
+    if 'pending_delay_row' in context.user_data:
+        physical_row = context.user_data.pop('pending_delay_row')
+        msg_id = context.user_data.pop('pending_delay_msg_id')
+        
+        ai_prompt = f"Extract the numeric duration in total minutes from this text: '{user_text}'. Respond with ONLY an integer number."
+        response = await ai_model.generate_content_async(ai_prompt)
+        ai_res = response.text.strip()
+        
+        try:
+            minutes_to_add = int(ai_res)
+            now_local = datetime.now(LOCAL_TIMEZONE)
+            new_target = now_local + timedelta(minutes=minutes_to_add)
+            
+            await asyncio.to_thread(sheet.update_cell, physical_row, 3, new_target.strftime("%Y-%m-%d"))
+            await asyncio.to_thread(sheet.update_cell, physical_row, 4, new_target.strftime("%H:%M"))
+            await asyncio.to_thread(sheet.update_cell, physical_row, 6, "Active")
+            
+            await update.message.reply_text(f"🔄 Custom delay set! Moved to {new_target.strftime('%H:%M')}.")
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+        except Exception as e:
+            await update.message.reply_text("Could not parse time window. Please try again with a simple entry like '45m'.")
+        return 
+
+    # 2. CHECK FOR MISSING TIME DRAFT
+    draft_context = ""
+    if 'draft_task_name' in context.user_data:
+        draft_name = context.user_data.pop('draft_task_name')
+        draft_context = f"\nCRITICAL: The user is clarifying the time for a previous task: '{draft_name}'. Keep this task name and extract the new date/time from the text."
+
+    # 3. STANDARD PARSING
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        task_list = await parse_task_with_ai(user_text, draft_context)
+        
+        if isinstance(task_list, dict):
+            task_list = [task_list]
+            
+        response_messages = []
+        
+        for task_data in task_list:
+            intent = task_data.get("intent", "create")
+            task_name = task_data.get("task_name", "Untitled Task")
+            
+            if intent in ["complete", "cancel"]:
+                names_col = await asyncio.to_thread(sheet.col_values, 2)
+                status_col = await asyncio.to_thread(sheet.col_values, 6)
+                
+                target_name_lower = task_name.lower()
+                found_row = None
+                actual_name = ""
+                
+                for i in range(1, len(names_col)):
+                    status = status_col[i] if i < len(status_col) else ""
                     if str(status).strip() == "Active" and target_name_lower in str(names_col[i]).lower():
                         found_row = i + 1
                         actual_name = names_col[i]
@@ -295,24 +366,38 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
                 continue 
             
             task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S%f")[:8]
-            target_date = task_data.get("date", "Unknown")
-            target_time = task_data.get("time", "Unknown")
+            target_date = str(task_data.get("date", "Unknown"))
+            target_time = str(task_data.get("time", "Unknown"))
             duration = task_data.get("duration", "Unknown")
             recurrence = task_data.get("recurrence", "None")
+            needs_clarification = task_data.get("needs_clarification", False)
+            
+            # Bulletproof check for missing information
+            is_missing = (
+                needs_clarification == True or 
+                target_date.lower() in ["unknown", "none", "null", ""] or 
+                target_time.lower() in ["unknown", "none", "null", ""]
+            )
+
+            if is_missing:
+                context.user_data['draft_task_name'] = task_name
+                response_messages.append(f"📝 I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
+                continue
             
             row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
             await asyncio.to_thread(sheet.append_row, row_to_add)
             
             response_messages.append(f"✅ **Saved:** {task_name} 📅 {target_date} 🕒 {target_time}")
             
-        await update.message.reply_text("\n\n".join(response_messages), parse_mode="Markdown")
+        if response_messages:
+            await update.message.reply_text("\n\n".join(response_messages), parse_mode="Markdown")
 
     except Exception as e:
         print(f"Parse error: {e}", flush=True)
-        safe_error = sanitize_error(e) # ADDED SANITIZER HERE
+        safe_error = sanitize_error(e) 
         error_message = (
             f"❌ Sorry, I had trouble parsing that task.\n\n"
-            f"🛠️ **Debug Info for Youness:**\n`{safe_error}`"
+            f"🛠️ **Debug Info:**\n`{safe_error}`"
         )
         await update.message.reply_text(error_message, parse_mode="Markdown")
 
@@ -353,27 +438,33 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             draft_context = f"\nCRITICAL: The user is clarifying the time for a previous task: '{draft_name}'. Keep this task name and extract the new date/time from the audio."
 
         system_prompt = f"""
-    You are a precise data extraction engine for a personal task manager bot.
-    The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
-    {draft_context}
-    
-    Analyze the incoming user message. The user might mention MULTIPLE tasks in one message.
-    Extract the data fields and return them strictly as a JSON ARRAY of objects, even if there is only one task.
-    Format exactly like this:
-    [
-      {{
-        "intent": "create", "complete", or "cancel",
-        "task_name": "A clear title",
-        "date": "YYYY-MM-DD",
-        "time": "HH:MM",
-        "duration": "Unknown",
-        "recurrence": "None"
-      }}
-    ]
+        You are a precise data extraction engine for a personal task manager bot.
+        The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+        {draft_context}
+        
+        Analyze the incoming user message. The user might mention MULTIPLE tasks.
+        Extract the data fields and return them strictly as a JSON ARRAY of objects.
+        Format exactly like this:
+        [
+          {{
+            "intent": "create", "complete", or "cancel",
+            "task_name": "A clear title",
+            "date": "YYYY-MM-DD",
+            "time": "HH:MM",
+            "duration": "Unknown",
+            "recurrence": "None",
+            "needs_clarification": false
+          }}
+        ]
 
-    CRITICAL RULE FOR TIME: If the user provides a time range, you MUST randomly pick ONE specific minute.
-    Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
-    """
+        CRITICAL RULES:
+        1. If a time range is given, pick ONE specific minute.
+        2. If the user does NOT specify a date, output "Unknown".
+        3. If the user does NOT specify a time, output "Unknown".
+        4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
+        
+        Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
+        """
         
         response = await ai_model.generate_content_async(
             contents=[audio_part, system_prompt],
@@ -382,7 +473,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         
         task_list = json.loads(response.text)
         
-        # LOOP ADDED FOR VOICE BATCH PROCESSING
         if isinstance(task_list, dict):
             task_list = [task_list]
             
@@ -423,13 +513,20 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 continue
                 
             task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S%f")[:8]
-            target_date = task_data.get("date", "Unknown")
-            target_time = task_data.get("time", "Unknown")
+            target_date = str(task_data.get("date", "Unknown"))
+            target_time = str(task_data.get("time", "Unknown"))
             duration = task_data.get("duration", "Unknown")
             recurrence = task_data.get("recurrence", "None")
             needs_clarification = task_data.get("needs_clarification", False)
 
-            if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
+            # Bulletproof check for missing information
+            is_missing = (
+                needs_clarification == True or 
+                target_date.lower() in ["unknown", "none", "null", ""] or 
+                target_time.lower() in ["unknown", "none", "null", ""]
+            )
+
+            if is_missing:
                 context.user_data['draft_task_name'] = task_name
                 response_messages.append(f"🎙️ I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
                 continue
@@ -439,7 +536,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             
             response_messages.append(f"🎙️ **Voice Task Saved:** {task_name} 📅 {target_date} 🕒 {target_time}")
             
-        await update.message.reply_text("\n\n".join(response_messages), parse_mode="Markdown")
+        if response_messages:
+            await update.message.reply_text("\n\n".join(response_messages), parse_mode="Markdown")
         
     except Exception as e:
         print(f"Voice parse error: {e}", flush=True) 
