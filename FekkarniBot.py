@@ -335,8 +335,15 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(confirmation, parse_mode="Markdown")
         
     except Exception as e:
-        print(f"Voice parse error: {e}")
-        await update.message.reply_text("❌ Sorry, I had trouble understanding that voice note.")
+        # Adding flush=True forces Render to print this immediately
+        print(f"Voice parse error: {e}", flush=True) 
+        
+        # Send the exact Python error directly back to Telegram
+        error_message = (
+            f"❌ Sorry, I had trouble understanding that voice note.\n\n"
+            f"🛠️ **Debug Info for Youness:**\n`{str(e)}`"
+        )
+        await update.message.reply_text(error_message, parse_mode="Markdown")
         
     finally:
         # 7. Delete the local temporary file from Render
