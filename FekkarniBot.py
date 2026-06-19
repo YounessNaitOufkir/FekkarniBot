@@ -278,7 +278,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await voice_file_info.download_to_drive(temp_file_path)
         
         # 2. Upload to Gemini securely in the background
-        audio_file = await asyncio.to_thread(genai.upload_file, path=temp_file_path)
+        audio_file = await asyncio.to_thread(genai.upload_file, path=temp_file_path, mime_type="audio/ogg")
         
         # 3. Process the audio with AI
         now_local = datetime.now(LOCAL_TIMEZONE)
