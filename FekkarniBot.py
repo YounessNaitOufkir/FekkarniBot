@@ -495,41 +495,53 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             os.remove(temp_file_path)
 
 
-# --- AGENDA HANDLER ---
+# --- AGENDA & TODAY HANDLER ---
 async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    command = update.message.text.split()[0].lower() # Detects if user typed /today or /agenda
+    
     try:
         now_local = datetime.now(LOCAL_TIMEZONE)
         today_str = now_local.strftime("%Y-%m-%d")
         
         all_records = await asyncio.to_thread(sheet.get_all_records)
         
-        todays_tasks = [
-            row for row in all_records 
-            if str(row.get('Date', '')).strip() == today_str and str(row.get('Status', '')).strip() == "Active"
-        ]
-        
-        if not todays_tasks:
-            await update.message.reply_text("🎉 You have no remaining tasks for today! Enjoy your free time.")
+        # Filter: If /today, only show today's date. If /agenda, show ALL active tasks.
+        if "today" in command:
+            active_tasks = [
+                row for row in all_records 
+                if str(row.get('Status', '')).strip() == "Active" and str(row.get('Date', '')).strip() == today_str
+            ]
+            title = f"📅 **Your Tasks for Today ({today_str})**"
+        else:
+            active_tasks = [
+                row for row in all_records 
+                if str(row.get('Status', '')).strip() == "Active"
+            ]
+            title = "📋 **Your Full Agenda (All Active Tasks)**"
+            
+        if not active_tasks:
+            await update.message.reply_text("🎉 You have no active tasks to show! Enjoy your time, Youness.")
             return
             
-        todays_tasks.sort(key=lambda x: str(x.get('Time', '23:59')))
+        # Sort by Date first, then Time
+        active_tasks.sort(key=lambda x: (str(x.get('Date', '9999-12-31')), str(x.get('Time', '23:59'))))
         
-        agenda_text = f"📅 **Your Agenda for Today ({today_str})**\n\n"
-        for t in todays_tasks:
-            time_val = t.get('Time', 'Unknown')
+        agenda_text = f"{title}\n\n"
+        for t in active_tasks:
+            date_val = t.get('Date', 'No Date')
+            time_val = t.get('Time', 'No Time')
             name_val = t.get('Task Name', 'Untitled')
-            dur_val = t.get('Duration', '')
-            dur_str = f" (⏳ {dur_val})" if dur_val and dur_val != 'Unknown' else ""
             
-            agenda_text += f"• **{time_val}** - {name_val}{dur_str}\n"
+            # Formatting: Display date if viewing full agenda
+            date_str = f"[{date_val}] " if "Full Agenda" in title else ""
+            agenda_text += f"• {date_str}**{time_val}** - {name_val}\n"
             
-        agenda_text += "\n_You've got this! Let me know if you need to add or change anything._"
         await update.message.reply_text(agenda_text, parse_mode="Markdown")
         
     except Exception as e:
-        print(f"Agenda error: {e}", flush=True)
-        await update.message.reply_text("❌ Sorry, I had trouble fetching your agenda from the database.")
+        print(f"Agenda/Today error: {e}", flush=True)
+        await update.message.reply_text("❌ Sorry, I had trouble fetching your tasks.")
         
 
 # --- START COMMAND ---
