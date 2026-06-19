@@ -375,6 +375,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_button_clicks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     
     print("Bot is fully initialized and preparing to poll...")
     app.run_polling()
