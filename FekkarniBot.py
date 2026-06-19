@@ -297,8 +297,12 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(confirmation, parse_mode="Markdown")
         
     except Exception as e:
-        print(f"Parse error: {e}")
-        await update.message.reply_text("❌ Sorry, I had trouble parsing that task.")
+        print(f"Parse error: {e}", flush=True)
+        error_message = (
+            f"❌ Sorry, I had trouble parsing that task.\n\n"
+            f"🛠️ **Debug Info for Youness:**\n`{str(e)}`"
+        )
+        await update.message.reply_text(error_message, parse_mode="Markdown")
 
 
 # Handle voice notes
