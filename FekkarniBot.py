@@ -23,7 +23,7 @@ SHEET_NAME = os.getenv("SHEET_NAME")
 
 # Init Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-ai_model = genai.GenerativeModel("gemini-2.0-flash")
+ai_model = genai.GenerativeModel("gemini-flash-latest")
 
 # Connect to Google Sheets
 print("Connecting to Google Sheets...")
