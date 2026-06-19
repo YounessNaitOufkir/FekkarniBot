@@ -64,8 +64,8 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 
-# --- 3. AI PARSING BRAIN ---
-def parse_task_with_ai(user_text: str) -> dict:
+# --- 3. ASYNCHRONOUS AI PARSING BRAIN ---
+async def parse_task_with_ai(user_text: str) -> dict:
     now_local = datetime.now(LOCAL_TIMEZONE)
     current_date_str = now_local.strftime("%Y-%m-%d")
     current_time_str = now_local.strftime("%H:%M")
@@ -76,18 +76,19 @@ def parse_task_with_ai(user_text: str) -> dict:
     The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
     The user lives in Casablanca, Morocco.
     
-    Analyze the incoming user message which may be in English, French, Arabic, or Moroccan Darija (or a mix).
+    Analyze the incoming user message which may be in English, French, Arabic, or Moroccan Darija.
     Extract the following data fields and return them strictly as a JSON object:
-    - task_name: A clear, professional title of what needs to be done (translate to English or French for consistency).
-    - date: The target date for the reminder in YYYY-MM-DD format. Calculate relative dates like 'tomorrow', 'next Friday', 'ghadan' based on the context.
+    - task_name: A clear, professional title of what needs to be done.
+    - date: The target date for the reminder in YYYY-MM-DD format. Calculate relative dates like 'tomorrow'.
     - time: The target time for the reminder in 24-hour HH:MM format.
-    - duration: The estimated duration mentioned (e.g., '2h', '30m'). If not mentioned, default to 'Unknown'.
-    - recurrence: If the task repeats, set this value to 'Daily', 'Weekly', 'Monthly'. If it is a one-time task, set it to 'None'.
+    - duration: The estimated duration mentioned. If not mentioned, default to 'Unknown'.
+    - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
+    - needs_clarification: Set to true ONLY IF the user completely forgot to mention any specific date or time. Otherwise false.
 
     Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
     """
     
-    response = ai_model.generate_content(
+    response = await ai_model.generate_content_async(
         contents=f"User Message: {user_text}\n\nContext Instructions:\n{system_prompt}",
         generation_config={"response_mime_type": "application/json"}
     )
@@ -196,34 +197,33 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['pending_delay_msg_id'] = query.message.message_id
         await query.message.reply_text("How many minutes or hours would you like to delay this? (e.g., type '45m' or '2 hours')")
 
-
-# --- 6. NATURAL TEXT HANDLER ---
+# --- 6. ASYNC NATURAL TEXT HANDLER ---
 async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = str(update.effective_chat.id)
     
-    # Save Chat ID securely
     if os.getenv("CHAT_ID") != chat_id:
         with open(".env", "a") as env_file:
             env_file.write(f"\nCHAT_ID={chat_id}")
         os.environ["CHAT_ID"] = chat_id
 
-    # Check if we are waiting for a custom delay input
+    # Custom Delay Logic
     if 'pending_delay_row' in context.user_data:
         row_index = context.user_data.pop('pending_delay_row')
         msg_id = context.user_data.pop('pending_delay_msg_id')
         
         ai_prompt = f"Extract the numeric duration in total minutes from this text: '{user_text}'. Respond with ONLY an integer number."
-        ai_res = ai_model.generate_content(ai_prompt).text.strip()
+        response = await ai_model.generate_content_async(ai_prompt)
+        ai_res = response.text.strip()
         
         try:
             minutes_to_add = int(ai_res)
             now_local = datetime.now(LOCAL_TIMEZONE)
             new_target = now_local + timedelta(minutes=minutes_to_add)
             
-            sheet.update_cell(row_index, 3, new_target.strftime("%Y-%m-%d"))
-            sheet.update_cell(row_index, 4, new_target.strftime("%H:%M"))
-            sheet.update_cell(row_index, 6, "Active")
+            await asyncio.to_thread(sheet.update_cell, row_index, 3, new_target.strftime("%Y-%m-%d"))
+            await asyncio.to_thread(sheet.update_cell, row_index, 4, new_target.strftime("%H:%M"))
+            await asyncio.to_thread(sheet.update_cell, row_index, 6, "Active")
             
             await update.message.reply_text(f"🔄 Custom delay set! Moved to {new_target.strftime('%H:%M')}.")
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
@@ -231,10 +231,15 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Could not parse time window. Please try again with a simple entry like '45m'.")
         return
 
-    # Standard task parsing
+    # 🌟 NEW: Check if we are waiting for missing time/date
+    if 'draft_task_name' in context.user_data:
+        draft_name = context.user_data.pop('draft_task_name')
+        # We silently combine the saved task name with your new time!
+        user_text = f"The task is: '{draft_name}'. The date and time is: {user_text}"
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        task_data = parse_task_with_ai(user_text)
+        task_data = await parse_task_with_ai(user_text)
         task_id = datetime.now(LOCAL_TIMEZONE).strftime("%M%S")
         
         task_name = task_data.get("task_name", "Untitled Task")
@@ -242,9 +247,16 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         target_time = task_data.get("time", "Unknown")
         duration = task_data.get("duration", "Unknown")
         recurrence = task_data.get("recurrence", "None")
+        needs_clarification = task_data.get("needs_clarification", False)
+        
+        # 🌟 NEW: The Missing Information Trigger
+        if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
+            context.user_data['draft_task_name'] = task_name
+            await update.message.reply_text(f"📌 I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
+            return # We stop here and do not save to the Google Sheet yet
         
         row_to_add = [task_id, task_name, target_date, target_time, duration, "Active", recurrence]
-        sheet.append_row(row_to_add)
+        await asyncio.to_thread(sheet.append_row, row_to_add)
         
         confirmation = (
             f"✅ **Task Saved!**\n\n"
@@ -265,7 +277,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     msg_id = update.message.message_id
     temp_file_path = f"voice_{msg_id}.ogg"
     
-    # Save Chat ID securely just in case this is the first message
     if os.getenv("CHAT_ID") != chat_id:
         with open(".env", "a") as env_file:
             env_file.write(f"\nCHAT_ID={chat_id}")
@@ -274,11 +285,9 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     
     try:
-        # 1. Download the voice note from Telegram
         voice_file_info = await context.bot.get_file(update.message.voice.file_id)
         await voice_file_info.download_to_drive(temp_file_path)
         
-        # 2. Read the audio bytes directly into memory (Bypasses the broken File API!)
         with open(temp_file_path, "rb") as f:
             audio_bytes = f.read()
             
@@ -287,28 +296,34 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "data": audio_bytes
         }
         
-        # 3. Process the audio with AI directly
         now_local = datetime.now(LOCAL_TIMEZONE)
         current_date_str = now_local.strftime("%Y-%m-%d")
         current_time_str = now_local.strftime("%H:%M")
         current_day_name = now_local.strftime("%A")
 
+        # 🌟 NEW: Check if this voice note is answering the missing time prompt
+        draft_context = ""
+        if 'draft_task_name' in context.user_data:
+            draft_name = context.user_data.pop('draft_task_name')
+            draft_context = f"\nCRITICAL: The user is clarifying the time for a previous task: '{draft_name}'. Keep this task name and extract the new date/time from the audio."
+
         system_prompt = f"""
         You are a precise data extraction engine for a personal task manager bot.
         The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+        {draft_context}
         
-        Listen to this audio message. The user lives in Casablanca, Morocco, so the audio may be in English, French, Arabic, or Moroccan Darija.
+        Listen to this audio message. The user lives in Casablanca, Morocco.
         Extract the following data fields and return them strictly as a JSON object:
         - task_name: A clear, professional title of what needs to be done.
         - date: The target date for the reminder in YYYY-MM-DD format.
         - time: The target time for the reminder in 24-hour HH:MM format.
         - duration: The estimated duration mentioned. Default to 'Unknown'.
         - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
+        - needs_clarification: Set to true ONLY IF the user completely forgot to mention any specific date or time. Otherwise false.
 
         Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
         """
         
-        # Pass the memory data directly instead of an uploaded file link
         response = await ai_model.generate_content_async(
             contents=[audio_part, system_prompt],
             generation_config={"response_mime_type": "application/json"}
@@ -316,18 +331,23 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         
         task_data = json.loads(response.text)
         
-        # 4. Save to Google Sheets
         task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S")
         task_name = task_data.get("task_name", "Untitled Task")
         target_date = task_data.get("date", "Unknown")
         target_time = task_data.get("time", "Unknown")
         duration = task_data.get("duration", "Unknown")
         recurrence = task_data.get("recurrence", "None")
+        needs_clarification = task_data.get("needs_clarification", False)
+
+        # 🌟 NEW: The Missing Information Trigger for Voice
+        if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
+            context.user_data['draft_task_name'] = task_name
+            await update.message.reply_text(f"🎙️ I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
+            return # We stop here and do not save to the Google Sheet yet
         
         row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
         await asyncio.to_thread(sheet.append_row, row_to_add)
         
-        # 5. Send Confirmation
         confirmation = (
             f"🎙️ **Voice Task Saved!**\n\n"
             f"📌 **Task:** {task_name}\n"
@@ -337,20 +357,16 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🔁 **Repeat:** {recurrence}\n"
         )
         await update.message.reply_text(confirmation, parse_mode="Markdown")
-    
-    except Exception as e:
-        # Adding flush=True forces Render to print this immediately
-        print(f"Voice parse error: {e}", flush=True) 
         
-        # Send the exact Python error directly back to Telegram
+    except Exception as e:
+        print(f"Voice parse error: {e}", flush=True) 
         error_message = (
             f"❌ Sorry, I had trouble understanding that voice note.\n\n"
-            f"🛠️ **Debug Info for Youness:**\n`{str(e)}`"
+            f"🛠️ **Debug Info:**\n`{str(e)}`"
         )
         await update.message.reply_text(error_message, parse_mode="Markdown")
         
     finally:
-        # 7. Delete the local temporary file from Render
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
