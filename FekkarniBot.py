@@ -258,6 +258,91 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         print(f"Parse error: {e}")
         await update.message.reply_text("❌ Sorry, I had trouble parsing that task.")
 
+# --- ASYNC VOICE NOTE HANDLER ---
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    msg_id = update.message.message_id
+    temp_file_path = f"voice_{msg_id}.ogg"
+    
+    # Save Chat ID securely just in case this is the first message
+    if os.getenv("CHAT_ID") != chat_id:
+        with open(".env", "a") as env_file:
+            env_file.write(f"\nCHAT_ID={chat_id}")
+        os.environ["CHAT_ID"] = chat_id
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    
+    try:
+        # 1. Download the voice note from Telegram
+        voice_file_info = await context.bot.get_file(update.message.voice.file_id)
+        await voice_file_info.download_to_drive(temp_file_path)
+        
+        # 2. Upload to Gemini securely in the background
+        audio_file = await asyncio.to_thread(genai.upload_file, path=temp_file_path)
+        
+        # 3. Process the audio with AI
+        now_local = datetime.now(LOCAL_TIMEZONE)
+        current_date_str = now_local.strftime("%Y-%m-%d")
+        current_time_str = now_local.strftime("%H:%M")
+        current_day_name = now_local.strftime("%A")
+
+        system_prompt = f"""
+        You are a precise data extraction engine for a personal task manager bot.
+        The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+        
+        Listen to this audio message. The user lives in Casablanca, Morocco, so the audio may be in English, French, Arabic, or Moroccan Darija.
+        Extract the following data fields and return them strictly as a JSON object:
+        - task_name: A clear, professional title of what needs to be done.
+        - date: The target date for the reminder in YYYY-MM-DD format.
+        - time: The target time for the reminder in 24-hour HH:MM format.
+        - duration: The estimated duration mentioned. Default to 'Unknown'.
+        - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
+
+        Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
+        """
+        
+        # We pass the audio file and the prompt together to Gemini
+        response = await ai_model.generate_content_async(
+            contents=[audio_file, system_prompt],
+            generation_config={"response_mime_type": "application/json"}
+        )
+        
+        task_data = json.loads(response.text)
+        
+        # 4. Clean up the file from Google's servers to save space
+        await asyncio.to_thread(genai.delete_file, audio_file.name)
+        
+        # 5. Save to Google Sheets
+        task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S")
+        task_name = task_data.get("task_name", "Untitled Task")
+        target_date = task_data.get("date", "Unknown")
+        target_time = task_data.get("time", "Unknown")
+        duration = task_data.get("duration", "Unknown")
+        recurrence = task_data.get("recurrence", "None")
+        
+        row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
+        await asyncio.to_thread(sheet.append_row, row_to_add)
+        
+        # 6. Send Confirmation
+        confirmation = (
+            f"🎙️ **Voice Task Saved!**\n\n"
+            f"📌 **Task:** {task_name}\n"
+            f"📅 **Date:** {target_date}\n"
+            f"🕒 **Time:** {target_time}\n"
+            f"⏳ **Duration:** {duration}\n"
+            f"🔁 **Repeat:** {recurrence}\n"
+        )
+        await update.message.reply_text(confirmation, parse_mode="Markdown")
+        
+    except Exception as e:
+        print(f"Voice parse error: {e}")
+        await update.message.reply_text("❌ Sorry, I had trouble understanding that voice note.")
+        
+    finally:
+        # 7. Delete the local temporary file from Render
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fekkarni Bot is fully online! Send me a reminder anytime.")
 
