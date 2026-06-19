@@ -2,6 +2,7 @@ import os
 import json
 import threading
 import asyncio
+import random
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytz
@@ -80,7 +81,7 @@ async def parse_task_with_ai(user_text: str) -> dict:
     Extract the following data fields and return them strictly as a JSON object:
     - task_name: A clear, professional title of what needs to be done.
     - date: The target date for the reminder in YYYY-MM-DD format. Calculate relative dates like 'tomorrow'.
-    - time: The target time for the reminder in 24-hour HH:MM format.
+    - time: The target time for the reminder in 24-hour HH:MM format. If the user asks for a general time window (e.g., 'this afternoon', 'between 1 and 3'), pick a specific, random time within that window.
     - duration: The estimated duration mentioned. If not mentioned, default to 'Unknown'.
     - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
     - needs_clarification: Set to true ONLY IF the user completely forgot to mention any specific date or time. Otherwise false.
@@ -162,9 +163,21 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if action == "done":
-        recurrence = sheet.cell(row_index, 7).value
+        # 🌟 NEW: Dynamic, personalized encouragement
+        success_messages = [
+            "✅ Marked as done. Keep it up!",
+            "✅ Excellent work! Task completed.",
+            "✅ You're on a roll, Youness! Dashboard updated.",
+            "✅ Boom! Another one off the list."
+        ]
+        encouragement = random.choice(success_messages)
+
+        rec_cell = await asyncio.to_thread(sheet.cell, row_index, 7)
+        recurrence = rec_cell.value
         if recurrence and recurrence != "None":
-            current_date_val = datetime.strptime(sheet.cell(row_index, 3).value, "%Y-%m-%d")
+            date_cell = await asyncio.to_thread(sheet.cell, row_index, 3)
+            current_date_val = datetime.strptime(date_cell.value, "%Y-%m-%d")
+            
             if recurrence == "Daily":
                 next_date = current_date_val + timedelta(days=1)
             elif recurrence == "Weekly":
@@ -172,12 +185,12 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             elif recurrence == "Monthly":
                 next_date = current_date_val + timedelta(days=30)
                 
-            sheet.update_cell(row_index, 3, next_date.strftime("%Y-%m-%d"))
-            sheet.update_cell(row_index, 6, "Active")
-            await query.edit_message_text(f"✅ Completed! Rescheduled for {next_date.strftime('%Y-%m-%d')}.")
+            await asyncio.to_thread(sheet.update_cell, row_index, 3, next_date.strftime("%Y-%m-%d"))
+            await asyncio.to_thread(sheet.update_cell, row_index, 6, "Active")
+            await query.edit_message_text(f"{encouragement} Rescheduled for {next_date.strftime('%Y-%m-%d')}.")
         else:
-            sheet.update_cell(row_index, 6, "Completed")
-            await query.edit_message_text("✅ Task marked as Completed in your dashboard!")
+            await asyncio.to_thread(sheet.update_cell, row_index, 6, "Completed")
+            await query.edit_message_text(encouragement)
             
     elif action == "cancel":
         sheet.update_cell(row_index, 6, "Cancelled")
@@ -316,7 +329,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         Extract the following data fields and return them strictly as a JSON object:
         - task_name: A clear, professional title of what needs to be done.
         - date: The target date for the reminder in YYYY-MM-DD format.
-        - time: The target time for the reminder in 24-hour HH:MM format.
+        - time: The target time for the reminder in 24-hour HH:MM format. If the user asks for a general time window (e.g., 'this afternoon', 'between 1 and 3'), pick a specific, random time within that window.
         - duration: The estimated duration mentioned. Default to 'Unknown'.
         - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
         - needs_clarification: Set to true ONLY IF the user completely forgot to mention any specific date or time. Otherwise false.
@@ -370,6 +383,46 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
+# --- ASYNC AGENDA HANDLER ---
+async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        now_local = datetime.now(LOCAL_TIMEZONE)
+        today_str = now_local.strftime("%Y-%m-%d")
+        
+        # Fetch all records in the background
+        all_records = await asyncio.to_thread(sheet.get_all_records)
+        
+        # Filter for tasks that are today and active
+        todays_tasks = [
+            row for row in all_records 
+            if str(row.get('Date', '')).strip() == today_str and str(row.get('Status', '')).strip() == "Active"
+        ]
+        
+        if not todays_tasks:
+            await update.message.reply_text("🎉 You have no remaining tasks for today! Enjoy your free time, Youness.")
+            return
+            
+        # Sort tasks chronologically by time
+        todays_tasks.sort(key=lambda x: str(x.get('Time', '23:59')))
+        
+        agenda_text = f"📅 **Your Agenda for Today ({today_str})**\n\n"
+        for t in todays_tasks:
+            time_val = t.get('Time', 'Unknown')
+            name_val = t.get('Task Name', 'Untitled')
+            dur_val = t.get('Duration', '')
+            dur_str = f" (⏳ {dur_val})" if dur_val and dur_val != 'Unknown' else ""
+            
+            agenda_text += f"• **{time_val}** - {name_val}{dur_str}\n"
+            
+        agenda_text += "\n_You've got this! Let me know if you need to add or change anything._"
+        await update.message.reply_text(agenda_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        print(f"Agenda error: {e}", flush=True)
+        await update.message.reply_text("❌ Sorry, I had trouble fetching your agenda from the database.")
+        
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "👋 **Welcome to Fekkarni!** Your personal AI memory assistant.\n\n"
@@ -409,6 +462,10 @@ def main():
 
     # Handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("agenda", handle_agenda)) # <--- NEW
+    app.add_handler(CommandHandler("today", handle_agenda))  # <--- NEW
+    app.add_handler(CallbackQueryHandler(handle_button_clicks))
+    # ...
     app.add_handler(CallbackQueryHandler(handle_button_clicks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
