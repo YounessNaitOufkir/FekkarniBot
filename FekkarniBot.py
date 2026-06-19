@@ -36,6 +36,20 @@ print("Connected successfully!")
 # Set local timezone
 LOCAL_TIMEZONE = pytz.timezone("Africa/Casablanca")
 
+# --- SECURITY SANITIZER ---
+def sanitize_error(error_msg: Exception) -> str:
+    """Scans error messages and redacts sensitive API keys before displaying them."""
+    safe_text = str(error_msg)
+    
+    # Hide Gemini Key
+    if GEMINI_API_KEY and GEMINI_API_KEY in safe_text:
+        safe_text = safe_text.replace(GEMINI_API_KEY, "********[REDACTED_API_KEY]********")
+        
+    # Hide Telegram Token
+    if TELEGRAM_TOKEN and TELEGRAM_TOKEN in safe_text:
+        safe_text = safe_text.replace(TELEGRAM_TOKEN, "********[REDACTED_BOT_TOKEN]********")
+        
+    return safe_text
 
 # Background web server to keep Render from putting the app to sleep
 def run_dummy_server():
@@ -297,10 +311,13 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(confirmation, parse_mode="Markdown")
         
     except Exception as e:
-        print(f"Parse error: {e}", flush=True)
+        print(f"Parse error: {e}", flush=True) # It is safe to print the real error to Render's private logs
+        
+        # Sanitize for public Telegram display
+        safe_error = sanitize_error(e) 
         error_message = (
             f"❌ Sorry, I had trouble parsing that task.\n\n"
-            f"🛠️ **Debug Info for Youness:**\n`{str(e)}`"
+            f"🛠️ **Debug Info:**\n`{safe_error}`"
         )
         await update.message.reply_text(error_message, parse_mode="Markdown")
 
@@ -416,9 +433,12 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         
     except Exception as e:
         print(f"Voice parse error: {e}", flush=True) 
+        
+        # Sanitize for public Telegram display
+        safe_error = sanitize_error(e)
         error_message = (
             f"❌ Sorry, I had trouble understanding that voice note.\n\n"
-            f"🛠️ **Debug Info:**\n`{str(e)}`"
+            f"🛠️ **Debug Info:**\n`{safe_error}`"
         )
         await update.message.reply_text(error_message, parse_mode="Markdown")
         
