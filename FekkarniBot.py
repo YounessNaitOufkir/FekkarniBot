@@ -40,18 +40,13 @@ LOCAL_TIMEZONE = pytz.timezone("Africa/Casablanca")
 def sanitize_error(error_msg: Exception) -> str:
     """Scans error messages and redacts sensitive API keys before displaying them."""
     safe_text = str(error_msg)
-    
-    # Hide Gemini Key
     if GEMINI_API_KEY and GEMINI_API_KEY in safe_text:
         safe_text = safe_text.replace(GEMINI_API_KEY, "********[REDACTED_API_KEY]********")
-        
-    # Hide Telegram Token
     if TELEGRAM_TOKEN and TELEGRAM_TOKEN in safe_text:
         safe_text = safe_text.replace(TELEGRAM_TOKEN, "********[REDACTED_BOT_TOKEN]********")
-        
     return safe_text
 
-# Background web server to keep Render from putting the app to sleep
+# --- DUMMY SERVER ---
 def run_dummy_server():
     class DummyHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -60,7 +55,6 @@ def run_dummy_server():
             self.wfile.write(b"Fekkarni Bot is active and running smoothly 24/7.")
             
         def do_HEAD(self):
-            # Render pings HEAD to check if the app is alive
             self.send_response(200)
             self.end_headers()
             
@@ -72,7 +66,7 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 
-# Helper to extract task details and intent using Gemini
+# --- AI PARSING ENGINE ---
 async def parse_task_with_ai(user_text: str) -> dict:
     now_local = datetime.now(LOCAL_TIMEZONE)
     current_date_str = now_local.strftime("%Y-%m-%d")
@@ -101,31 +95,32 @@ async def parse_task_with_ai(user_text: str) -> dict:
     return json.loads(response.text)
 
 
-# Background job running every 60s to check for due tasks
+# --- BACKGROUND SCHEDULER ---
 async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
         now_local = datetime.now(LOCAL_TIMEZONE)
         today_str = now_local.strftime("%Y-%m-%d")
         time_str = now_local.strftime("%H:%M")
         
-        all_records = sheet.get_all_records()
+        # Wrapped in asyncio to prevent the bot from freezing
+        all_records = await asyncio.to_thread(sheet.get_all_records)
         
         for index, row in enumerate(all_records, start=2):
-            if str(row['Status']).strip() == "Active":
-                if str(row['Date']) == today_str and str(row['Time']) == time_str:
+            if str(row.get('Status', '')).strip() == "Active":
+                if str(row.get('Date', '')) == today_str and str(row.get('Time', '')) == time_str:
                     
                     task_id = row['Task ID']
                     task_name = row['Task Name']
-                    duration = row['Duration']
+                    duration = row.get('Duration', 'Unknown')
                     
                     keyboard = [
                         [
-                            InlineKeyboardButton("✅ Complete", callback_data=f"done_{task_id}_{index}"),
-                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{task_id}_{index}")
+                            InlineKeyboardButton("✅ Complete", callback_data=f"done_{task_id}"),
+                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{task_id}")
                         ],
                         [
-                            InlineKeyboardButton("⏳ Snooze 30m", callback_data=f"snooze_{task_id}_{index}"),
-                            InlineKeyboardButton("🔄 Custom Delay", callback_data=f"delay_{task_id}_{index}")
+                            InlineKeyboardButton("⏳ Snooze 30m", callback_data=f"snooze_{task_id}"),
+                            InlineKeyboardButton("🔄 Custom Delay", callback_data=f"delay_{task_id}")
                         ]
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -151,7 +146,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error checking scheduler: {e}")
 
 
-# Process inline button clicks (Done, Cancel, Snooze, Custom Delay)
+# --- BUTTON CLICK HANDLER ---
 async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -159,11 +154,17 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
     data_parts = query.data.split("_")
     action = data_parts[0]
     task_id = data_parts[1]
-    row_index = int(data_parts[2])
     
-    # Ensure sheet layout hasn't changed since the button was rendered
-    if str(sheet.cell(row_index, 1).value) != str(task_id):
-        await query.edit_message_text("❌ Synchronization error. The dashboard layout changed.")
+    # Bulletproof physical row lookup (ignores layout changes)
+    col_ids = await asyncio.to_thread(sheet.col_values, 1)
+    physical_row = None
+    for i, val in enumerate(col_ids):
+        if str(val).strip().lstrip('0') == str(task_id).lstrip('0'):
+            physical_row = i + 1
+            break
+            
+    if not physical_row:
+        await query.edit_message_text("❌ Synchronization error. Task no longer exists in dashboard.")
         return
 
     if action == "done":
@@ -175,12 +176,11 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
         ]
         encouragement = random.choice(success_messages)
 
-        rec_cell = await asyncio.to_thread(sheet.cell, row_index, 7)
+        rec_cell = await asyncio.to_thread(sheet.cell, physical_row, 7)
         recurrence = rec_cell.value
         
-        # Reschedule if recurring, otherwise just mark completed
         if recurrence and recurrence != "None":
-            date_cell = await asyncio.to_thread(sheet.cell, row_index, 3)
+            date_cell = await asyncio.to_thread(sheet.cell, physical_row, 3)
             current_date_val = datetime.strptime(date_cell.value, "%Y-%m-%d")
             
             if recurrence == "Daily":
@@ -190,46 +190,44 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             elif recurrence == "Monthly":
                 next_date = current_date_val + timedelta(days=30)
                 
-            await asyncio.to_thread(sheet.update_cell, row_index, 3, next_date.strftime("%Y-%m-%d"))
-            await asyncio.to_thread(sheet.update_cell, row_index, 6, "Active")
+            await asyncio.to_thread(sheet.update_cell, physical_row, 3, next_date.strftime("%Y-%m-%d"))
+            await asyncio.to_thread(sheet.update_cell, physical_row, 6, "Active")
             await query.edit_message_text(f"{encouragement} Rescheduled for {next_date.strftime('%Y-%m-%d')}.")
         else:
-            await asyncio.to_thread(sheet.update_cell, row_index, 6, "Completed")
+            await asyncio.to_thread(sheet.update_cell, physical_row, 6, "Completed")
             await query.edit_message_text(encouragement)
             
     elif action == "cancel":
-        sheet.update_cell(row_index, 6, "Cancelled")
+        await asyncio.to_thread(sheet.update_cell, physical_row, 6, "Cancelled")
         await query.edit_message_text("❌ Task has been cancelled.")
         
     elif action == "snooze":
         now_local = datetime.now(LOCAL_TIMEZONE)
         new_time = now_local + timedelta(minutes=30)
         
-        sheet.update_cell(row_index, 3, new_time.strftime("%Y-%m-%d"))
-        sheet.update_cell(row_index, 4, new_time.strftime("%H:%M"))
-        sheet.update_cell(row_index, 6, "Active")
+        await asyncio.to_thread(sheet.update_cell, physical_row, 3, new_time.strftime("%Y-%m-%d"))
+        await asyncio.to_thread(sheet.update_cell, physical_row, 4, new_time.strftime("%H:%M"))
+        await asyncio.to_thread(sheet.update_cell, physical_row, 6, "Active")
         await query.edit_message_text(f"⏳ Task snoozed for 30 minutes. New target: {new_time.strftime('%H:%M')}")
         
     elif action == "delay":
-        context.user_data['pending_delay_row'] = row_index
+        context.user_data['pending_delay_row'] = physical_row
         context.user_data['pending_delay_msg_id'] = query.message.message_id
         await query.message.reply_text("How many minutes or hours would you like to delay this? (e.g., type '45m' or '2 hours')")
 
 
-# Handle standard text messages
+# --- TEXT HANDLER ---
 async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = str(update.effective_chat.id)
     
-    # Store chat ID for background jobs if not already saved
     if os.getenv("CHAT_ID") != chat_id:
         with open(".env", "a") as env_file:
             env_file.write(f"\nCHAT_ID={chat_id}")
         os.environ["CHAT_ID"] = chat_id
 
-    # If waiting for a custom delay input
     if 'pending_delay_row' in context.user_data:
-        row_index = context.user_data.pop('pending_delay_row')
+        physical_row = context.user_data.pop('pending_delay_row')
         msg_id = context.user_data.pop('pending_delay_msg_id')
         
         ai_prompt = f"Extract the numeric duration in total minutes from this text: '{user_text}'. Respond with ONLY an integer number."
@@ -241,9 +239,9 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             now_local = datetime.now(LOCAL_TIMEZONE)
             new_target = now_local + timedelta(minutes=minutes_to_add)
             
-            await asyncio.to_thread(sheet.update_cell, row_index, 3, new_target.strftime("%Y-%m-%d"))
-            await asyncio.to_thread(sheet.update_cell, row_index, 4, new_target.strftime("%H:%M"))
-            await asyncio.to_thread(sheet.update_cell, row_index, 6, "Active")
+            await asyncio.to_thread(sheet.update_cell, physical_row, 3, new_target.strftime("%Y-%m-%d"))
+            await asyncio.to_thread(sheet.update_cell, physical_row, 4, new_target.strftime("%H:%M"))
+            await asyncio.to_thread(sheet.update_cell, physical_row, 6, "Active")
             
             await update.message.reply_text(f"🔄 Custom delay set! Moved to {new_target.strftime('%H:%M')}.")
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
@@ -251,7 +249,6 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Could not parse time window. Please try again with a simple entry like '45m'.")
         return
 
-    # If following up on a task that was missing time/date
     if 'draft_task_name' in context.user_data:
         draft_name = context.user_data.pop('draft_task_name')
         user_text = f"The task is: '{draft_name}'. The date and time is: {user_text}"
@@ -262,42 +259,50 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         intent = task_data.get("intent", "create")
         task_name = task_data.get("task_name", "Untitled Task")
         
-        # Handle updating existing tasks (complete/cancel)
+        # Intent Router (Updates existing tasks robustly)
         if intent in ["complete", "cancel"]:
             all_records = await asyncio.to_thread(sheet.get_all_records)
             target_name_lower = task_name.lower()
-            found_row = None
+            task_id_to_update = None
             actual_name = ""
             
-            for index, row in enumerate(all_records, start=2):
-                if str(row['Status']).strip() == "Active" and target_name_lower in str(row['Task Name']).lower():
-                    found_row = index
-                    actual_name = row['Task Name']
+            for row in all_records:
+                if str(row.get('Status', '')).strip() == "Active" and target_name_lower in str(row.get('Task Name', '')).lower():
+                    task_id_to_update = str(row.get('Task ID', ''))
+                    actual_name = row.get('Task Name', '')
                     break
                     
-            if found_row:
-                new_status = "Completed" if intent == "complete" else "Cancelled"
-                await asyncio.to_thread(sheet.update_cell, found_row, 6, new_status)
-                await update.message.reply_text(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+            if task_id_to_update:
+                col_ids = await asyncio.to_thread(sheet.col_values, 1)
+                physical_row = None
+                for i, val in enumerate(col_ids):
+                    if str(val).strip().lstrip('0') == str(task_id_to_update).lstrip('0'):
+                        physical_row = i + 1
+                        break
+                        
+                if physical_row:
+                    new_status = "Completed" if intent == "complete" else "Cancelled"
+                    await asyncio.to_thread(sheet.update_cell, physical_row, 6, new_status)
+                    await update.message.reply_text(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+                else:
+                    await update.message.reply_text("❌ Error syncing with dashboard. Task not found in Column A.")
             else:
                 await update.message.reply_text(f"❌ I couldn't find an active task matching '{task_name}' in your agenda.")
             return
             
-        # Handle creating new tasks
-        task_id = datetime.now(LOCAL_TIMEZONE).strftime("%M%S")
+        task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%d%H%M%S")
         target_date = task_data.get("date", "Unknown")
         target_time = task_data.get("time", "Unknown")
         duration = task_data.get("duration", "Unknown")
         recurrence = task_data.get("recurrence", "None")
         needs_clarification = task_data.get("needs_clarification", False)
         
-        # Catch tasks missing scheduling info before saving to the sheet
         if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
             context.user_data['draft_task_name'] = task_name
             await update.message.reply_text(f"📌 I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
             return
         
-        row_to_add = [task_id, task_name, target_date, target_time, duration, "Active", recurrence]
+        row_to_add = [task_id_str, task_name, target_date, target_time, duration, "Active", recurrence]
         await asyncio.to_thread(sheet.append_row, row_to_add)
         
         confirmation = (
@@ -311,9 +316,7 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(confirmation, parse_mode="Markdown")
         
     except Exception as e:
-        print(f"Parse error: {e}", flush=True) # It is safe to print the real error to Render's private logs
-        
-        # Sanitize for public Telegram display
+        print(f"Parse error: {e}", flush=True) 
         safe_error = sanitize_error(e) 
         error_message = (
             f"❌ Sorry, I had trouble parsing that task.\n\n"
@@ -322,7 +325,7 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(error_message, parse_mode="Markdown")
 
 
-# Handle voice notes
+# --- VOICE NOTE HANDLER ---
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     msg_id = update.message.message_id
@@ -336,11 +339,9 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     
     try:
-        # Download audio from Telegram
         voice_file_info = await context.bot.get_file(update.message.voice.file_id)
         await voice_file_info.download_to_drive(temp_file_path)
         
-        # Read directly into memory to bypass the buggy Gemini File API
         with open(temp_file_path, "rb") as f:
             audio_bytes = f.read()
             
@@ -354,7 +355,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         current_time_str = now_local.strftime("%H:%M")
         current_day_name = now_local.strftime("%A")
 
-        # Inject context if we are clarifying a previous prompt
         draft_context = ""
         if 'draft_task_name' in context.user_data:
             draft_name = context.user_data.pop('draft_task_name')
@@ -373,6 +373,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
 
         Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
+        {draft_context}
         """
         
         response = await ai_model.generate_content_async(
@@ -384,35 +385,44 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         intent = task_data.get("intent", "create")
         task_name = task_data.get("task_name", "Untitled Task")
         
-        # Handle updating existing tasks
+        # Intent Router (Updates existing tasks robustly)
         if intent in ["complete", "cancel"]:
             all_records = await asyncio.to_thread(sheet.get_all_records)
             target_name_lower = task_name.lower()
-            found_row = None
+            task_id_to_update = None
             actual_name = ""
             
-            for index, row in enumerate(all_records, start=2):
-                if str(row['Status']).strip() == "Active" and target_name_lower in str(row['Task Name']).lower():
-                    found_row = index
-                    actual_name = row['Task Name']
+            for row in all_records:
+                if str(row.get('Status', '')).strip() == "Active" and target_name_lower in str(row.get('Task Name', '')).lower():
+                    task_id_to_update = str(row.get('Task ID', ''))
+                    actual_name = row.get('Task Name', '')
                     break
                     
-            if found_row:
-                new_status = "Completed" if intent == "complete" else "Cancelled"
-                await asyncio.to_thread(sheet.update_cell, found_row, 6, new_status)
-                await update.message.reply_text(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+            if task_id_to_update:
+                col_ids = await asyncio.to_thread(sheet.col_values, 1)
+                physical_row = None
+                for i, val in enumerate(col_ids):
+                    if str(val).strip().lstrip('0') == str(task_id_to_update).lstrip('0'):
+                        physical_row = i + 1
+                        break
+                        
+                if physical_row:
+                    new_status = "Completed" if intent == "complete" else "Cancelled"
+                    await asyncio.to_thread(sheet.update_cell, physical_row, 6, new_status)
+                    await update.message.reply_text(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+                else:
+                    await update.message.reply_text("❌ Error syncing with dashboard. Task not found in Column A.")
             else:
                 await update.message.reply_text(f"❌ I couldn't find an active task matching '{task_name}' in your agenda.")
             return
             
-        task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S")
+        task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%d%H%M%S")
         target_date = task_data.get("date", "Unknown")
         target_time = task_data.get("time", "Unknown")
         duration = task_data.get("duration", "Unknown")
         recurrence = task_data.get("recurrence", "None")
         needs_clarification = task_data.get("needs_clarification", False)
 
-        # Catch missing scheduling info
         if needs_clarification or target_date == "Unknown" or target_time == "Unknown":
             context.user_data['draft_task_name'] = task_name
             await update.message.reply_text(f"🎙️ I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like me to remind you?")
@@ -433,8 +443,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         
     except Exception as e:
         print(f"Voice parse error: {e}", flush=True) 
-        
-        # Sanitize for public Telegram display
         safe_error = sanitize_error(e)
         error_message = (
             f"❌ Sorry, I had trouble understanding that voice note.\n\n"
@@ -443,12 +451,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(error_message, parse_mode="Markdown")
         
     finally:
-        # Clean up temp file to save server space
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
 
-# Fetch and format active tasks for the current day
+# --- AGENDA HANDLER ---
 async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
@@ -457,7 +464,6 @@ async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         all_records = await asyncio.to_thread(sheet.get_all_records)
         
-        # Filter active tasks matching today's date
         todays_tasks = [
             row for row in all_records 
             if str(row.get('Date', '')).strip() == today_str and str(row.get('Status', '')).strip() == "Active"
@@ -467,7 +473,6 @@ async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🎉 You have no remaining tasks for today! Enjoy your free time, Youness.")
             return
             
-        # Sort chronologically
         todays_tasks.sort(key=lambda x: str(x.get('Time', '23:59')))
         
         agenda_text = f"📅 **Your Agenda for Today ({today_str})**\n\n"
@@ -487,7 +492,7 @@ async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sorry, I had trouble fetching your agenda from the database.")
         
 
-# Onboarding message
+# --- START COMMAND ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "👋 **Welcome to Fekkarni!** Your personal AI memory assistant.\n\n"
@@ -502,7 +507,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 
-# Setup bot connections and polling loop
+# --- ENGINE RUNNER ---
 def main():
     app = (
         Application.builder()
@@ -517,7 +522,6 @@ def main():
     current_time = datetime.now()
     seconds_until_perfect_minute = 60 - current_time.second
     
-    # Sync job queue with the top of the minute
     if app.job_queue:
         app.job_queue.run_repeating(check_and_send_reminders, interval=60, first=seconds_until_perfect_minute)
         print("JobQueue successfully verified and clock synchronized.")
