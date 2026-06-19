@@ -66,19 +66,19 @@ async def parse_task_with_ai(user_text: str) -> dict:
     current_day_name = now_local.strftime("%A")
 
     system_prompt = f"""
-        You are a precise data extraction engine for a personal task manager bot.
-        The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
-        
-        Analyze the incoming user message. Extract the following data fields and return them strictly as a JSON object:
-        - intent: Use "create" if they are adding a new task. Use "complete" if they are telling you they finished a task. Use "cancel" if they want to delete/stop a task.
-        - task_name: A clear title of the task to create, complete, or cancel.
-        - date: The target date for the reminder in YYYY-MM-DD format. Default to 'Unknown'.
-        - time: The target time for the reminder in 24-hour HH:MM format. Default to 'Unknown'.
-        - duration: The estimated duration mentioned. Default to 'Unknown'.
-        - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
+    You are a precise data extraction engine for a personal task manager bot.
+    The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+    
+    Analyze the incoming user message. Extract the following data fields and return them strictly as a JSON object:
+    - intent: Use "create" if they are adding a new task. Use "complete" if finishing a task. Use "cancel" if stopping a task.
+    - task_name: A clear title of the task to create, complete, or cancel.
+    - date: The target date for the reminder in YYYY-MM-DD format. Default to 'Unknown'.
+    - time: The target time in 24-hour HH:MM format. CRITICAL RULE: If the user provides a time range (e.g., "between 5 and 6" or "around 5:30 and 6:30"), you MUST randomly pick ONE specific minute inside that range (e.g., "17:42") and output ONLY that specific time. Never output a range.
+    - duration: The estimated duration mentioned. Default to 'Unknown'.
+    - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
 
-        Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
-        """
+    Output ONLY a valid raw JSON object. Do not wrap it in markdown block quotes.
+    """
     
     response = await ai_model.generate_content_async(
         contents=f"User Message: {user_text}\n\nContext Instructions:\n{system_prompt}",
@@ -342,13 +342,12 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         system_prompt = f"""
         You are a precise data extraction engine for a personal task manager bot.
         The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
-        {draft_context}
-        
+    
         Analyze the incoming user message. Extract the following data fields and return them strictly as a JSON object:
-        - intent: Use "create" if they are adding a new task. Use "complete" if they are telling you they finished a task. Use "cancel" if they want to delete/stop a task.
+        - intent: Use "create" if they are adding a new task. Use "complete" if finishing a task. Use "cancel" if stopping a task.
         - task_name: A clear title of the task to create, complete, or cancel.
         - date: The target date for the reminder in YYYY-MM-DD format. Default to 'Unknown'.
-        - time: The target time for the reminder in 24-hour HH:MM format. Default to 'Unknown'.
+        - time: The target time in 24-hour HH:MM format. CRITICAL RULE: If the user provides a time range (e.g., "between 5 and 6" or "around 5:30 and 6:30"), you MUST randomly pick ONE specific minute inside that range (e.g., "17:42") and output ONLY that specific time. Never output a range.
         - duration: The estimated duration mentioned. Default to 'Unknown'.
         - recurrence: 'Daily', 'Weekly', 'Monthly', or 'None'.
 
