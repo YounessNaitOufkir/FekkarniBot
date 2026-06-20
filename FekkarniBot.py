@@ -73,35 +73,36 @@ async def parse_task_with_ai(user_text: str, draft_context: str = "") -> list:
     current_day_name = now_local.strftime("%A")
 
     system_prompt = f"""
-    You are a precise data extraction engine for a personal task manager bot.
-    The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
-    {draft_context}
-    
-    Analyze the incoming user message. The user might mention MULTIPLE tasks.
-    Extract the data fields and return them strictly as a JSON ARRAY of objects, even if there is only one task.
-    Format exactly like this:
-    [
-      {{
-        "intent": "create", "complete", or "cancel",
-        "task_name": "A clear title",
-        "date": "YYYY-MM-DD",
-        "time": "HH:MM",
-        "duration": "Unknown",
-        "recurrence": "None",
-        "needs_clarification": false
-      }}
-    ]
+        You are a precise data extraction engine for a personal task manager bot.
+        The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
+        {draft_context}
+        
+        Analyze the incoming user message. Extract the data fields and return them strictly as a JSON ARRAY of objects.
+        
+        Format exactly like this:
+        [
+          {{
+            "intent": "create", "complete", or "cancel",
+            "task_name": "A clear title",
+            "date": "YYYY-MM-DD",
+            "time": "HH:MM",
+            "duration": "Unknown",
+            "recurrence": "None",
+            "needs_clarification": false
+          }}
+        ]
 
-    CRITICAL RULES:
-    1. If a time range is given, pick ONE specific minute.
-    2. If the user does NOT specify a date, output "Unknown".
-    3. If the user does NOT specify a time, output "Unknown".
-    4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
-    5. If intent is "complete" or "cancel", extract ONLY the core identifying keywords for the `task_name`. Completely remove filler words like "task", "reminder", "the", "my".
-    6. BULK ACTIONS: If the user wants to complete or cancel ALL tasks, set "task_name" to exactly "ALL_TASKS". If they specify all of TODAY's tasks, set it to exactly "TODAYS_TASKS". Do not create multiple objects; just output one.
-    
-    Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
-    """
+        CRITICAL RULES:
+        1. If a time range is given, pick ONE specific minute.
+        2. If the user does NOT specify a date or time, output "Unknown".
+        3. If intent is "create" and date/time is missing, set "needs_clarification" to true.
+        4. If intent is "complete" or "cancel", extract ONLY the core identifying keywords. Completely remove filler words.
+        5. MULTIPLE TASKS: If the user explicitly lists distinct tasks (e.g. "Do X and do Y"), create multiple objects in the array.
+        6. BULK ACTIONS: If the user asks to complete/cancel "ALL tasks", "everything", or "all of my tasks", you MUST output exactly ONE object with "task_name": "ALL_TASKS". Do NOT output multiple objects.
+        7. BULK TODAY: If the user specifies "today's tasks", output exactly ONE object with "task_name": "TODAYS_TASKS". Do NOT output multiple objects.
+        
+        Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
+        """
     
     response = await ai_model.generate_content_async(
         contents=f"User Message: {user_text}\n\nContext Instructions:\n{system_prompt}",
@@ -406,8 +407,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         The current local date is {current_date_str}, the current time is {current_time_str}, and today is {current_day_name}.
         {draft_context}
         
-        Analyze the incoming user message. The user might mention MULTIPLE tasks.
-        Extract the data fields and return them strictly as a JSON ARRAY of objects.
+        Analyze the incoming user message. Extract the data fields and return them strictly as a JSON ARRAY of objects.
+        
         Format exactly like this:
         [
           {{
@@ -423,11 +424,12 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         CRITICAL RULES:
         1. If a time range is given, pick ONE specific minute.
-        2. If the user does NOT specify a date, output "Unknown".
-        3. If the user does NOT specify a time, output "Unknown".
-        4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
-        5. If intent is "complete" or "cancel", extract ONLY the core identifying keywords for the `task_name`. Completely remove filler words like "task", "reminder", "the", "my".
-        6. BULK ACTIONS: If the user wants to complete or cancel ALL tasks, set "task_name" to exactly "ALL_TASKS". If they specify all of TODAY's tasks, set it to exactly "TODAYS_TASKS". Do not create multiple objects; just output one.
+        2. If the user does NOT specify a date or time, output "Unknown".
+        3. If intent is "create" and date/time is missing, set "needs_clarification" to true.
+        4. If intent is "complete" or "cancel", extract ONLY the core identifying keywords. Completely remove filler words.
+        5. MULTIPLE TASKS: If the user explicitly lists distinct tasks (e.g. "Do X and do Y"), create multiple objects in the array.
+        6. BULK ACTIONS: If the user asks to complete/cancel "ALL tasks", "everything", or "all of my tasks", you MUST output exactly ONE object with "task_name": "ALL_TASKS". Do NOT output multiple objects.
+        7. BULK TODAY: If the user specifies "today's tasks", output exactly ONE object with "task_name": "TODAYS_TASKS". Do NOT output multiple objects.
         
         Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
         """
