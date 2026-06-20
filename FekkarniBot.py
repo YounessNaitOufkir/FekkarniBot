@@ -98,6 +98,7 @@ async def parse_task_with_ai(user_text: str, draft_context: str = "") -> list:
     3. If the user does NOT specify a time, output "Unknown".
     4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
     5. If intent is "complete" or "cancel", extract ONLY the core identifying keywords for the `task_name`. Completely remove filler words like "task", "reminder", "the", "my".
+    6. BULK ACTIONS: If the user wants to complete or cancel ALL tasks, set "task_name" to exactly "ALL_TASKS". If they specify all of TODAY's tasks, set it to exactly "TODAYS_TASKS". Do not create multiple objects; just output one.
     
     Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
     """
@@ -279,33 +280,54 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             
             if intent in ["complete", "cancel"]:
                 names_col = await asyncio.to_thread(sheet.col_values, 2)
+                dates_col = await asyncio.to_thread(sheet.col_values, 3)
                 status_col = await asyncio.to_thread(sheet.col_values, 6)
                 
-                # --- FUZZY SEARCH UPGRADE ---
-                target_name_lower = task_name.lower()
-                clean_target = target_name_lower.replace("task", "").replace("reminder", "").replace("the", "").replace("my", "").strip()
-                target_words = [w for w in clean_target.split() if len(w) > 2] # Only search meaningful keywords
+                target_name_upper = task_name.strip().upper()
+                found_rows = []
+                actual_names = []
                 
-                found_row = None
-                actual_name = ""
+                now_local = datetime.now(LOCAL_TIMEZONE)
+                today_str = now_local.strftime("%Y-%m-%d")
                 
-                for i in range(1, len(names_col)):
-                    status = status_col[i] if i < len(status_col) else ""
-                    sheet_name_lower = str(names_col[i]).lower()
-                    
-                    if str(status).strip() == "Active":
-                        # Match if the exact phrase is found, OR if all the key words are found scattered in the name
-                        if clean_target in sheet_name_lower or (target_words and all(w in sheet_name_lower for w in target_words)):
-                            found_row = i + 1
-                            actual_name = names_col[i]
-                            break
-                            
-                if found_row:
-                    new_status = "Completed" if intent == "complete" else "Cancelled"
-                    await asyncio.to_thread(sheet.update_cell, found_row, 6, new_status)
-                    response_messages.append(f"✅ Marked **{actual_name}** as {new_status}.")
+                # --- BULK ACTION ENGINE ---
+                if target_name_upper in ["ALL_TASKS", "TODAYS_TASKS"]:
+                    for i in range(1, len(names_col)):
+                        status = status_col[i] if i < len(status_col) else ""
+                        date_val = dates_col[i] if i < len(dates_col) else ""
+                        if str(status).strip() == "Active":
+                            if target_name_upper == "ALL_TASKS" or (target_name_upper == "TODAYS_TASKS" and str(date_val).strip() == today_str):
+                                found_rows.append(i + 1)
+                
+                # --- FUZZY SEARCH (SINGLE TASKS) ---
                 else:
-                    response_messages.append(f"❌ Couldn't find active task matching '{task_name}'.")
+                    target_name_lower = task_name.lower()
+                    clean_target = target_name_lower.replace("task", "").replace("reminder", "").replace("the", "").replace("my", "").replace("all", "").strip()
+                    target_words = [w for w in clean_target.split() if len(w) > 2]
+                    
+                    for i in range(1, len(names_col)):
+                        status = status_col[i] if i < len(status_col) else ""
+                        sheet_name_lower = str(names_col[i]).lower()
+                        
+                        if str(status).strip() == "Active":
+                            if clean_target in sheet_name_lower or (target_words and all(w in sheet_name_lower for w in target_words)):
+                                found_rows.append(i + 1)
+                                actual_names.append(names_col[i])
+                                break
+                                
+                if found_rows:
+                    new_status = "Completed" if intent == "complete" else "Cancelled"
+                    for row in found_rows:
+                        await asyncio.to_thread(sheet.update_cell, row, 6, new_status)
+                    
+                    if target_name_upper == "ALL_TASKS":
+                        response_messages.append(f"💥 **BOOM!** Marked all {len(found_rows)} active tasks as {new_status}.")
+                    elif target_name_upper == "TODAYS_TASKS":
+                        response_messages.append(f"🧹 Swept up! Marked {len(found_rows)} tasks for today as {new_status}.")
+                    else:
+                        response_messages.append(f"✅ Marked **{actual_names[0]}** as {new_status}.")
+                else:
+                    response_messages.append(f"❌ Couldn't find any active tasks matching '{task_name}'.")
                 continue 
             
             task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S%f")[:8]
@@ -405,6 +427,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         3. If the user does NOT specify a time, output "Unknown".
         4. If intent is "create" and date or time is missing, set "needs_clarification" to true.
         5. If intent is "complete" or "cancel", extract ONLY the core identifying keywords for the `task_name`. Completely remove filler words like "task", "reminder", "the", "my".
+        6. BULK ACTIONS: If the user wants to complete or cancel ALL tasks, set "task_name" to exactly "ALL_TASKS". If they specify all of TODAY's tasks, set it to exactly "TODAYS_TASKS". Do not create multiple objects; just output one.
         
         Output ONLY a valid raw JSON array. Do not wrap it in markdown block quotes.
         """
@@ -427,32 +450,54 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             
             if intent in ["complete", "cancel"]:
                 names_col = await asyncio.to_thread(sheet.col_values, 2)
+                dates_col = await asyncio.to_thread(sheet.col_values, 3)
                 status_col = await asyncio.to_thread(sheet.col_values, 6)
                 
-                # --- FUZZY SEARCH UPGRADE ---
-                target_name_lower = task_name.lower()
-                clean_target = target_name_lower.replace("task", "").replace("reminder", "").replace("the", "").replace("my", "").strip()
-                target_words = [w for w in clean_target.split() if len(w) > 2]
+                target_name_upper = task_name.strip().upper()
+                found_rows = []
+                actual_names = []
                 
-                found_row = None
-                actual_name = ""
+                now_local = datetime.now(LOCAL_TIMEZONE)
+                today_str = now_local.strftime("%Y-%m-%d")
                 
-                for i in range(1, len(names_col)):
-                    status = status_col[i] if i < len(status_col) else ""
-                    sheet_name_lower = str(names_col[i]).lower()
-                    
-                    if str(status).strip() == "Active":
-                        if clean_target in sheet_name_lower or (target_words and all(w in sheet_name_lower for w in target_words)):
-                            found_row = i + 1
-                            actual_name = names_col[i]
-                            break
-                            
-                if found_row:
-                    new_status = "Completed" if intent == "complete" else "Cancelled"
-                    await asyncio.to_thread(sheet.update_cell, found_row, 6, new_status)
-                    response_messages.append(f"✅ Got it! I have marked **{actual_name}** as {new_status}.")
+                # --- BULK ACTION ENGINE ---
+                if target_name_upper in ["ALL_TASKS", "TODAYS_TASKS"]:
+                    for i in range(1, len(names_col)):
+                        status = status_col[i] if i < len(status_col) else ""
+                        date_val = dates_col[i] if i < len(dates_col) else ""
+                        if str(status).strip() == "Active":
+                            if target_name_upper == "ALL_TASKS" or (target_name_upper == "TODAYS_TASKS" and str(date_val).strip() == today_str):
+                                found_rows.append(i + 1)
+                
+                # --- FUZZY SEARCH (SINGLE TASKS) ---
                 else:
-                    response_messages.append(f"❌ Couldn't find active task matching '{task_name}'.")
+                    target_name_lower = task_name.lower()
+                    clean_target = target_name_lower.replace("task", "").replace("reminder", "").replace("the", "").replace("my", "").replace("all", "").strip()
+                    target_words = [w for w in clean_target.split() if len(w) > 2]
+                    
+                    for i in range(1, len(names_col)):
+                        status = status_col[i] if i < len(status_col) else ""
+                        sheet_name_lower = str(names_col[i]).lower()
+                        
+                        if str(status).strip() == "Active":
+                            if clean_target in sheet_name_lower or (target_words and all(w in sheet_name_lower for w in target_words)):
+                                found_rows.append(i + 1)
+                                actual_names.append(names_col[i])
+                                break
+                                
+                if found_rows:
+                    new_status = "Completed" if intent == "complete" else "Cancelled"
+                    for row in found_rows:
+                        await asyncio.to_thread(sheet.update_cell, row, 6, new_status)
+                        
+                    if target_name_upper == "ALL_TASKS":
+                        response_messages.append(f"💥 **BOOM!** Marked all {len(found_rows)} active tasks as {new_status}.")
+                    elif target_name_upper == "TODAYS_TASKS":
+                        response_messages.append(f"🧹 Swept up! Marked {len(found_rows)} tasks for today as {new_status}.")
+                    else:
+                        response_messages.append(f"✅ Got it! I have marked **{actual_names[0]}** as {new_status}.")
+                else:
+                    response_messages.append(f"❌ Couldn't find any active tasks matching '{task_name}'.")
                 continue
                 
             task_id_str = datetime.now(LOCAL_TIMEZONE).strftime("%M%S%f")[:8]
@@ -493,7 +538,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-
 
 # --- AGENDA & TODAY HANDLER ---
 async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
