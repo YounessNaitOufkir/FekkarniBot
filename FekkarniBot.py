@@ -541,9 +541,21 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             os.remove(tmp)
 
 
-async def send_callmebot_call(username: str, task_name: str):
+async def send_callmebot_call(username: str, task_name: str, chat_id: str = None, bot = None):
     if not username:
         logger.warning("No Telegram username available for CallMeBot call.")
+        if chat_id and bot:
+            try:
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        "⚠️ CallMeBot Voice Call Skipped:\n\n"
+                        "Your Telegram account does not have a public @username set in Profile Settings.\n"
+                        "👉 Set a username in Telegram Settings so you can receive urgent voice call reminders!"
+                    ),
+                )
+            except Exception:
+                pass
         return
     un = username.strip().lstrip("@")
     url = (
@@ -558,8 +570,47 @@ async def send_callmebot_call(username: str, task_name: str):
                 return response.read().decode("utf-8", errors="ignore")
         res = await asyncio.to_thread(_fetch)
         logger.info("CallMeBot voice call initiated for @%s: %s (Response: %s)", un, task_name, res[:200])
+
+        if chat_id and bot and res:
+            res_lower = res.lower()
+            if any(w in res_lower for w in ("exceed", "limit", "rate limit", "busy", "quota")):
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        "⚠️ CallMeBot Rate Limit Exceeded!\n\n"
+                        "CallMeBot's free tier has temporarily limited calls to your Telegram account.\n\n"
+                        f"ℹ️ Server Response:\n{res.strip()}\n\n"
+                        "💡 Don't worry—your text reminder above was still delivered, and call quota usually resets shortly."
+                    ),
+                )
+            elif any(w in res_lower for w in ("not authorized", "not received", "auth.php")):
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        f"⚠️ CallMeBot Call Failed: Account Not Authorized!\n\n"
+                        f"CallMeBot blocked the call because @{un} is not authorized yet.\n\n"
+                        f"🚀 How to fix in 5 seconds:\n"
+                        f"1. Click here: https://api2.callmebot.com/txt/auth.php\n"
+                        f"2. Or message @CallMeBot_API on Telegram and send /start"
+                    ),
+                )
+            elif "not found" in res_lower or "error" in res_lower:
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        f"⚠️ CallMeBot API Error:\n\n{res.strip()}"
+                    ),
+                )
     except Exception as e:
         logger.error("CallMeBot voice call failed for @%s: %s", un, e)
+        if chat_id and bot:
+            try:
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=f"⚠️ CallMeBot Voice Call Failed:\n\n{str(e)}",
+                )
+            except Exception:
+                pass
 
 
 # ── SCHEDULER ──────────────────────────────────────────────────
@@ -597,7 +648,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
                     f"What would you like to do?"
                 )
                 if username:
-                    asyncio.create_task(send_callmebot_call(username, tn))
+                    asyncio.create_task(send_callmebot_call(username, tn, chat_id=str(cid), bot=context.bot))
             else:
                 txt = (
                     f"⏰ **REMINDER ALERT** ⏰\n\n"
