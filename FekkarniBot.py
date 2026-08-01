@@ -724,7 +724,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Just talk to me naturally — type or send a voice note.\n"
         "• _'Remind me to call the client tomorrow at 10 AM'_\n"
         "• _'Every Friday at 4 PM remind me to check the budget'_\n\n"
-        "**Commands:** /today · /agenda · /export · /help\n\n"
+        "**Commands:** /today · /agenda · /export · /testcall · /help\n\n"
         "Send me your first task right now!",
         parse_mode="Markdown",
     )
@@ -738,6 +738,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /today — Show today's tasks\n"
         "• /agenda — Show all active tasks\n"
         "• /export — Download your full task history as a CSV/Excel file\n"
+        "• /testcall — Test & diagnose your CallMeBot Telegram voice call setup\n"
         "• /help — This help message\n\n"
         "💡 **Tips:**\n"
         "• Type naturally or send a voice note to create tasks\n"
@@ -791,6 +792,53 @@ async def handle_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sorry, couldn't export your tasks right now.")
 
 
+# ── TEST CALL COMMAND ──────────────────────────────────────────
+async def handle_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_user.id)
+    first_name = str(update.effective_user.first_name)
+    username = f"@{update.effective_user.username}" if update.effective_user.username else ""
+    await ensure_user(chat_id, first_name, username)
+
+    if not username:
+        await update.message.reply_text(
+            "❌ **No Telegram Username Detected!**\n\n"
+            "CallMeBot requires a public `@username` to make calls, but your account only has a display name.\n\n"
+            "👉 **How to fix:** Go to **Telegram Settings -> My Profile -> Username**, set a username, and then try `/testcall` again!",
+            parse_mode="Markdown",
+        )
+        return
+
+    await update.message.reply_text(
+        f"📞 **Testing CallMeBot for {username}...**\n\n"
+        f"Sending voice call request to `api.callmebot.com` right now...",
+        parse_mode="Markdown",
+    )
+
+    un = username.strip().lstrip("@")
+    url = (
+        f"https://api.callmebot.com/start.php?user=@{urllib.parse.quote(un)}"
+        f"&text={urllib.parse.quote('This is a live test call from Fekkarni bot!')}"
+        f"&lang=en-GB-Standard-B&rpt=2"
+    )
+    try:
+        def _fetch():
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return response.read().decode("utf-8", errors="ignore")
+        res = await asyncio.to_thread(_fetch)
+        clean_res = res.strip() if res else "No text returned"
+        await update.message.reply_text(
+            f"ℹ️ **CallMeBot Server Response:**\n`{clean_res}`\n\n"
+            f"*(If the message above says 'Call in progress', your phone should ring in a few seconds! If it shows an authorization error, check that `{username}` sent `/start` to `@CallMeBot_txtbot`.)*",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ **CallMeBot API Error:**\n`{str(e)}`",
+            parse_mode="Markdown",
+        )
+
+
 # ── ENGINE RUNNER ──────────────────────────────────────────────
 def main():
     init_db()
@@ -818,6 +866,7 @@ def main():
     app.add_handler(CommandHandler("export", handle_export))
     app.add_handler(CommandHandler("mysheet", handle_export))
     app.add_handler(CommandHandler("sheet", handle_export))
+    app.add_handler(CommandHandler("testcall", handle_testcall))
     app.add_handler(CallbackQueryHandler(handle_button_clicks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
