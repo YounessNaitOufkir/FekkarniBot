@@ -592,7 +592,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
                     f"⏳ **Duration:** {dur}\n"
                     f"🔥 **Priority:** URGENT\n\n"
                     f"📞 *Initiating Telegram Voice Call via CallMeBot...*\n"
-                    f"*(Make sure you have authorized @CallMeBot_txtbot in Telegram to receive calls)*\n\n"
+                    f"*(Make sure you have authorized @CallMeBot_API in Telegram: https://api2.callmebot.com/txt/auth.php)*\n\n"
                     f"What would you like to do?"
                 )
                 if username:
@@ -825,10 +825,20 @@ async def handle_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with urllib.request.urlopen(req, timeout=15) as response:
                 return response.read().decode("utf-8", errors="ignore")
         res = await asyncio.to_thread(_fetch)
-        clean_res = res.strip() if res else "No text returned"
+        if res:
+            res_clean = re.sub(r"<script.*?>.*?</script>", "", res, flags=re.DOTALL | re.IGNORECASE)
+            res_clean = re.sub(r"<head.*?>.*?</head>", "", res_clean, flags=re.DOTALL | re.IGNORECASE)
+            res_clean = re.sub(r"<br\s*/?>", "\n", res_clean, flags=re.IGNORECASE)
+            res_clean = re.sub(r"<p\s*/?>", "\n\n", res_clean, flags=re.IGNORECASE)
+            res_clean = re.sub(r"<[^>]+>", "", res_clean)
+            res_clean = re.sub(r"\n\s*\n+", "\n\n", res_clean).strip()
+        else:
+            res_clean = "No text returned"
         await update.message.reply_text(
-            f"ℹ️ CallMeBot Server Response:\n\n{clean_res}\n\n"
-            f"(If the message above says 'Call in progress', your phone should ring in a few seconds! If it shows an authorization error, check that {username} sent /start to @CallMeBot_txtbot.)"
+            f"ℹ️ CallMeBot Server Response:\n\n{res_clean}\n\n"
+            f"🔗 How to authorize CallMeBot to call {username}:\n"
+            f"1. Click this link: https://api2.callmebot.com/txt/auth.php\n"
+            f"2. Or message @CallMeBot_API on Telegram and send /start!"
         )
     except Exception as e:
         logger.error("Testcall API error [%s]: %s", chat_id, e, exc_info=True)
