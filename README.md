@@ -10,6 +10,17 @@
 
 ---
 
+## 🤖 How to Use on Telegram (No Coding Required)
+
+If you are a regular user and want to use FekkarniBot right away:
+1. Open **Telegram** on your phone or desktop.
+2. Search for the bot by its username (or click your bot's Telegram link).
+3. Send **/start** to begin!
+4. **To receive Phone Call Reminders (Urgent Tasks):** Authorize free Telegram calls by clicking **[https://api2.callmebot.com/txt/auth.php](https://api2.callmebot.com/txt/auth.php)** and clicking **Start** (or message `@CallMeBot_API` on Telegram).
+5. Simply type or send a voice note (e.g., *"Remind me tomorrow at 4 PM to call Sarah — Urgent"*).
+
+---
+
 ## ✨ Features
 
 - 🎙️ **Multimodal Voice & Text Input:** Send a voice note like *"Remind me tomorrow at 4 PM to call Sarah"* or *"فكرني نهار الجمعة مع 10 دالصباح نخلص الكرا"*—Gemini automatically extracts the task name, date, time, and priority.
