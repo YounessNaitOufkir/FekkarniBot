@@ -84,22 +84,58 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 
-# ── MULTI-TENANT TAB HELPER ───────────────────────────────────
-async def get_user_sheet(chat_id: str, first_name: str):
-    doc = await asyncio.to_thread(gc.open, SHEET_NAME)
-    worksheets = await asyncio.to_thread(doc.worksheets)
+# ── USER SPREADSHEET CACHE ────────────────────────────────────
+_user_sheet_cache: dict[str, str] = {}
 
-    for ws in worksheets:
-        if ws.title.endswith(f"_{chat_id}"):
-            return ws
+
+# ── MULTI-TENANT SPREADSHEET HELPER (OPTION 1) ────────────────
+async def get_user_sheet(chat_id: str, first_name: str):
+    if chat_id in _user_sheet_cache:
+        spreadsheet_id = _user_sheet_cache[chat_id]
+        user_doc = await asyncio.to_thread(gc.open_by_key, spreadsheet_id)
+        return await asyncio.to_thread(user_doc.get_worksheet, 0)
+
+    registry_doc = await asyncio.to_thread(gc.open, SHEET_NAME)
+    registry_ws = await asyncio.to_thread(registry_doc.get_worksheet, 0)
+
+    first_row = await asyncio.to_thread(registry_ws.row_values, 1)
+    if not first_row or "Chat ID" not in first_row:
+        headers = ["Chat ID", "First Name", "Spreadsheet ID", "Spreadsheet URL", "Language", "Created At"]
+        await asyncio.to_thread(registry_ws.clear)
+        await asyncio.to_thread(registry_ws.append_row, headers)
+        records = []
+    else:
+        records = await asyncio.to_thread(registry_ws.get_all_records)
+
+    for row in records:
+        if str(row.get("Chat ID", "")).strip() == str(chat_id):
+            spreadsheet_id = str(row.get("Spreadsheet ID", "")).strip()
+            if spreadsheet_id:
+                _user_sheet_cache[chat_id] = spreadsheet_id
+                user_doc = await asyncio.to_thread(gc.open_by_key, spreadsheet_id)
+                return await asyncio.to_thread(user_doc.get_worksheet, 0)
 
     safe = "".join(c for c in str(first_name) if c.isalnum()).strip() or "User"
-    title = f"{safe}_{chat_id}"
-    sheet = await asyncio.to_thread(doc.add_worksheet, title=title, rows=1000, cols=10)
-    headers = ["Task ID", "Task Name", "Date", "Time", "Duration", "Status", "Recurrence"]
-    await asyncio.to_thread(sheet.append_row, headers)
-    logger.info("Created tab: %s", title)
-    return sheet
+    title = f"Fekkarni - {safe}_{chat_id}"
+    user_doc = await asyncio.to_thread(gc.create, title)
+    user_sheet = await asyncio.to_thread(user_doc.get_worksheet, 0)
+
+    task_headers = ["Task ID", "Task Name", "Date", "Time", "Duration", "Status", "Recurrence"]
+    await asyncio.to_thread(user_sheet.append_row, task_headers)
+
+    try:
+        await asyncio.to_thread(user_doc.share, None, perm_type="anyone", role="writer")
+    except Exception as e:
+        logger.warning("Could not set anyone share permission for %s: %s", chat_id, e)
+
+    url = f"https://docs.google.com/spreadsheets/d/{user_doc.id}"
+    now_str = datetime.now(DEFAULT_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    reg_row = [str(chat_id), str(first_name), user_doc.id, url, "en", now_str]
+    await asyncio.to_thread(registry_ws.append_row, reg_row)
+
+    _user_sheet_cache[chat_id] = user_doc.id
+    logger.info("Created dedicated spreadsheet for %s (%s): %s", first_name, chat_id, user_doc.id)
+    return user_sheet
 
 
 # ── SHARED PROMPT BUILDER ─────────────────────────────────────
@@ -335,17 +371,22 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
         today_s = snapshot_now.strftime("%Y-%m-%d")
         time_s = snapshot_now.strftime("%H:%M")
 
-        doc = await asyncio.to_thread(gc.open, SHEET_NAME)
-        sheets = await asyncio.to_thread(doc.worksheets)
+        registry_doc = await asyncio.to_thread(gc.open, SHEET_NAME)
+        registry_ws = await asyncio.to_thread(registry_doc.get_worksheet, 0)
+        first_row = await asyncio.to_thread(registry_ws.row_values, 1)
+        if not first_row or "Chat ID" not in first_row:
+            return
 
-        for ws in sheets:
-            if "_" not in ws.title:
-                continue
-            cid = ws.title.split("_")[-1]
-            if not cid.isdigit():
+        records = await asyncio.to_thread(registry_ws.get_all_records)
+        for user_reg in records:
+            cid = str(user_reg.get("Chat ID", "")).strip()
+            spreadsheet_id = str(user_reg.get("Spreadsheet ID", "")).strip()
+            if not cid or not spreadsheet_id or not cid.isdigit():
                 continue
 
             try:
+                user_doc = await asyncio.to_thread(gc.open_by_key, spreadsheet_id)
+                ws = await asyncio.to_thread(user_doc.get_worksheet, 0)
                 vals = await asyncio.to_thread(ws.get_all_values)
                 if len(vals) <= 1:
                     continue
@@ -366,13 +407,15 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
                         ]
                         txt = f"⏰ **REMINDER ALERT** ⏰\n\n📌 **Task:** {tn}\n⏳ **Duration:** {dur}\n\nWhat would you like to do?"
                         await context.bot.send_message(chat_id=int(cid), text=txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-                        logger.info("Fired reminder for %s: %s", ws.title, tn)
+                        logger.info("Fired reminder for user %s: %s", cid, tn)
 
             except gspread.exceptions.APIError as e:
                 if "RATE_LIMIT" in str(e):
-                    logger.warning("Rate-limited on sheet %s, skipping.", ws.title)
+                    logger.warning("Rate-limited on user sheet %s, skipping.", spreadsheet_id)
                 else:
                     raise
+            except Exception as e:
+                logger.error("Error checking reminders for user %s (%s): %s", cid, spreadsheet_id, e)
     except Exception as e:
         logger.error("Scheduler error: %s", e, exc_info=True)
 
@@ -494,7 +537,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Just talk to me naturally — type or send a voice note.\n"
         "• _'Remind me to call the client tomorrow at 10 AM'_\n"
         "• _'Every Friday at 4 PM remind me to check the budget'_\n\n"
-        "**Commands:** /today · /agenda · /help\n\n"
+        "**Commands:** /today · /agenda · /mysheet · /help\n\n"
         "Send me your first task right now!",
         parse_mode="Markdown",
     )
@@ -507,6 +550,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /start — Welcome message\n"
         "• /today — Show today's tasks\n"
         "• /agenda — Show all active tasks\n"
+        "• /mysheet — Link to your personal Google Sheet (editor access)\n"
         "• /help — This help message\n\n"
         "💡 **Tips:**\n"
         "• Type naturally or send a voice note to create tasks\n"
@@ -515,6 +559,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🌐 Supports English, العربية, and Français",
         parse_mode="Markdown",
     )
+
+
+# ── MYSHEET COMMAND ────────────────────────────────────────────
+async def handle_mysheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_user.id)
+    first_name = str(update.effective_user.first_name)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        await get_user_sheet(chat_id, first_name)
+        spreadsheet_id = _user_sheet_cache.get(chat_id)
+        if spreadsheet_id:
+            url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+            await update.message.reply_text(
+                f"🔗 **Your Personal Fekkarni Database**\n\n"
+                f"Here is the link to your own dedicated Google Spreadsheet where you can view and edit all your tasks:\n\n"
+                f"👉 [Open My Fekkarni Spreadsheet]({url})\n\n"
+                f"💡 _You have editor permissions (`role=writer`), so any changes you make in Google Sheets are synced!_",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text("❌ Could not retrieve your spreadsheet link. Please try sending a task first!")
+    except Exception as e:
+        logger.error("MySheet error [%s]: %s", chat_id, e, exc_info=True)
+        await update.message.reply_text("❌ Sorry, couldn't fetch your spreadsheet link right now.")
 
 
 # ── ENGINE RUNNER ──────────────────────────────────────────────
@@ -540,6 +609,8 @@ def main():
     app.add_handler(CommandHandler("help", help_command))  
     app.add_handler(CommandHandler("agenda", handle_agenda))
     app.add_handler(CommandHandler("today", handle_agenda))
+    app.add_handler(CommandHandler("mysheet", handle_mysheet))
+    app.add_handler(CommandHandler("sheet", handle_mysheet))
     app.add_handler(CallbackQueryHandler(handle_button_clicks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
