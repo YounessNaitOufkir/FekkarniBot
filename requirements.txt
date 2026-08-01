@@ -1,6 +1,5 @@
 python-telegram-bot[job-queue]
 google-generativeai
-gspread
 python-dotenv
 pytz
 python-dateutil
