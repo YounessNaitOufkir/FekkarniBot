@@ -8,6 +8,8 @@ import tempfile
 import threading
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.request
+import urllib.parse
 
 import pytz
 import sqlite3
@@ -104,42 +106,55 @@ def init_db():
                 status TEXT,
                 recurrence TEXT,
                 created_at TEXT,
-                last_reminded_at TEXT DEFAULT ''
+                last_reminded_at TEXT DEFAULT '',
+                priority TEXT DEFAULT 'Normal'
             )
         """)
         try:
             conn.execute("ALTER TABLE tasks ADD COLUMN last_reminded_at TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'Normal'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     logger.info("SQLite database initialized at %s", DB_PATH)
 
 
-def _ensure_user_sync(chat_id: str, first_name: str):
+def _ensure_user_sync(chat_id: str, first_name: str, username: str = ""):
     with sqlite3.connect(DB_PATH) as conn:
         now_str = datetime.now(DEFAULT_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
-            "INSERT OR IGNORE INTO users (chat_id, first_name, created_at) VALUES (?, ?, ?)",
-            (str(chat_id), str(first_name), now_str),
+            "INSERT OR IGNORE INTO users (chat_id, first_name, created_at, username) VALUES (?, ?, ?, ?)",
+            (str(chat_id), str(first_name), now_str, str(username)),
+        )
+        conn.execute(
+            "UPDATE users SET first_name = ?, username = ? WHERE chat_id = ?",
+            (str(first_name), str(username), str(chat_id)),
         )
         conn.commit()
 
 
-async def ensure_user(chat_id: str, first_name: str):
-    await asyncio.to_thread(_ensure_user_sync, str(chat_id), str(first_name))
+async def ensure_user(chat_id: str, first_name: str, username: str = ""):
+    await asyncio.to_thread(_ensure_user_sync, str(chat_id), str(first_name), str(username))
 
 
-def _add_task_sync(chat_id, first_name, task_id, task_name, target_date, target_time, duration, status, recurrence):
+def _add_task_sync(chat_id, first_name, task_id, task_name, target_date, target_time, duration, status, recurrence, priority, username):
     with sqlite3.connect(DB_PATH) as conn:
         now_str = datetime.now(DEFAULT_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
-            "INSERT OR IGNORE INTO users (chat_id, first_name, created_at) VALUES (?, ?, ?)",
-            (str(chat_id), str(first_name), now_str),
+            "INSERT OR IGNORE INTO users (chat_id, first_name, created_at, username) VALUES (?, ?, ?, ?)",
+            (str(chat_id), str(first_name), now_str, str(username)),
         )
         conn.execute(
             """
-            INSERT INTO tasks (task_id, chat_id, task_name, target_date, target_time, duration, status, recurrence, created_at, last_reminded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+            INSERT INTO tasks (task_id, chat_id, task_name, target_date, target_time, duration, status, recurrence, priority, created_at, last_reminded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
             """,
             (
                 str(task_id),
@@ -150,15 +165,16 @@ def _add_task_sync(chat_id, first_name, task_id, task_name, target_date, target_
                 str(duration),
                 str(status),
                 str(recurrence),
+                str(priority),
                 now_str,
             ),
         )
         conn.commit()
 
 
-async def add_task(chat_id, first_name, task_id, task_name, target_date, target_time, duration, status, recurrence):
+async def add_task(chat_id, first_name, task_id, task_name, target_date, target_time, duration, status="Active", recurrence="None", priority="Normal", username=""):
     await asyncio.to_thread(
-        _add_task_sync, chat_id, first_name, task_id, task_name, target_date, target_time, duration, status, recurrence
+        _add_task_sync, chat_id, first_name, task_id, task_name, target_date, target_time, duration, status, recurrence, priority, username
     )
 
 
@@ -297,12 +313,13 @@ def _get_due_reminders_sync(today_str, time_str):
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT task_id, chat_id, task_name, duration 
-            FROM tasks 
-            WHERE status = 'Active' 
-              AND target_date = ? 
-              AND target_time = ? 
-              AND (last_reminded_at IS NULL OR last_reminded_at != ?)
+            SELECT t.task_id, t.chat_id, t.task_name, t.duration, t.priority, u.username
+            FROM tasks t
+            LEFT JOIN users u ON t.chat_id = u.chat_id
+            WHERE t.status = 'Active' 
+              AND t.target_date = ? 
+              AND t.target_time = ? 
+              AND (t.last_reminded_at IS NULL OR t.last_reminded_at != ?)
             """,
             (str(today_str), str(time_str), str(remind_key)),
         ).fetchall()
@@ -338,7 +355,7 @@ def build_system_prompt(draft_context: str = "") -> str:
 {draft_context}
 
 # OUTPUT SCHEMA  (return a JSON ARRAY of objects)
-{{"intent":"create|complete|cancel","task_name":"string","date":"YYYY-MM-DD|Unknown","time":"HH:MM|Unknown","duration":"string|Unknown","recurrence":"None|Daily|Weekly|Monthly","needs_clarification":false}}
+{{"intent":"create|complete|cancel","task_name":"string","date":"YYYY-MM-DD|Unknown","time":"HH:MM|Unknown","duration":"string|Unknown","recurrence":"None|Daily|Weekly|Monthly","priority":"Normal|Urgent","needs_clarification":false}}
 
 # RULES
 1. "Today"={d}. "Tomorrow"={tmrw}.
@@ -356,8 +373,8 @@ def build_system_prompt(draft_context: str = "") -> str:
 13. User may write English, Arabic (Darija/MSA), or French. Keep original language in task_name.
 14. Do NOT invent tasks not mentioned.
 15. When unsure → intent "create", needs_clarification true.
+16. If the user mentions "urgent", "important", "ASAP", "darori", "crucial", or "critical", set priority to "Urgent". Otherwise default priority to "Normal".
 """
-
 
 # ── AI PARSER (UNIFIED FOR TEXT AND VOICE) ────────────────────
 async def parse_task_with_ai(contents, draft_context: str = "") -> list:
@@ -410,6 +427,7 @@ async def process_parsed_tasks(task_list, update: Update, context: ContextTypes.
         target_time = str(td.get("time", "Unknown"))
         duration = td.get("duration", "Unknown")
         recurrence = td.get("recurrence", "None")
+        priority = td.get("priority", "Normal")
         nc = td.get("needs_clarification", False)
 
         is_missing = (
@@ -423,10 +441,14 @@ async def process_parsed_tasks(task_list, update: Update, context: ContextTypes.
             msgs.append(f"📝 I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like?")
             continue
 
+        username = ""
+        if update and update.effective_user and update.effective_user.username:
+            username = f"@{update.effective_user.username}"
         await add_task(
-            chat_id, first_name, task_id_str, task_name, target_date, target_time, duration, "Active", recurrence
+            chat_id, first_name, task_id_str, task_name, target_date, target_time, duration, "Active", recurrence, priority, username
         )
-        msgs.append(f"✅ **Saved:** {task_name} 📅 {target_date} 🕒 {target_time}")
+        prio_badge = " 🔥 **[URGENT]**" if priority and str(priority).lower() == "urgent" else ""
+        msgs.append(f"✅ **Saved:** {task_name} 📅 {target_date} 🕒 {target_time}{prio_badge}")
 
     if msgs:
         await update.message.reply_text("\n\n".join(msgs), parse_mode="Markdown")
@@ -511,6 +533,26 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             os.remove(tmp)
 
 
+async def send_callmebot_call(username: str, task_name: str):
+    if not username:
+        logger.warning("No Telegram username available for CallMeBot call.")
+        return
+    un = username.strip().lstrip("@")
+    url = (
+        f"https://api.callmebot.com/start.php?user=%40{urllib.parse.quote(un)}"
+        f"&text={urllib.parse.quote('Urgent reminder from Fekkarni: ' + task_name)}"
+        f"&lang=en-US-Standard-C&rpt=2"
+    )
+    try:
+        def _fetch():
+            with urllib.request.urlopen(url, timeout=10) as response:
+                return response.read()
+        await asyncio.to_thread(_fetch)
+        logger.info("CallMeBot voice call initiated for @%s: %s", un, task_name)
+    except Exception as e:
+        logger.error("CallMeBot voice call failed for @%s: %s", un, e)
+
+
 # ── SCHEDULER ──────────────────────────────────────────────────
 async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -525,6 +567,8 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
             cid = row["chat_id"]
             tn = row["task_name"]
             dur = row.get("duration", "Unknown")
+            priority = row.get("priority", "Normal")
+            username = row.get("username", "")
 
             kb = [
                 [InlineKeyboardButton("✅ Complete", callback_data=f"done_{tid}"),
@@ -532,7 +576,26 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("⏳ Snooze 30m", callback_data=f"snooze_{tid}"),
                  InlineKeyboardButton("🔄 Custom Delay", callback_data=f"delay_{tid}")],
             ]
-            txt = f"⏰ **REMINDER ALERT** ⏰\n\n📌 **Task:** {tn}\n⏳ **Duration:** {dur}\n\nWhat would you like to do?"
+
+            if priority and str(priority).lower() == "urgent":
+                txt = (
+                    f"🚨 **URGENT REMINDER ALERT** 🚨\n\n"
+                    f"📌 **Task:** {tn}\n"
+                    f"⏳ **Duration:** {dur}\n"
+                    f"🔥 **Priority:** URGENT\n\n"
+                    f"📞 *Initiating Telegram Voice Call via CallMeBot...*\n"
+                    f"*(Make sure you have authorized @CallMeBot_txtbot in Telegram to receive calls)*\n\n"
+                    f"What would you like to do?"
+                )
+                if username:
+                    asyncio.create_task(send_callmebot_call(username, tn))
+            else:
+                txt = (
+                    f"⏰ **REMINDER ALERT** ⏰\n\n"
+                    f"📌 **Task:** {tn}\n"
+                    f"⏳ **Duration:** {dur}\n\n"
+                    f"What would you like to do?"
+                )
             try:
                 await context.bot.send_message(
                     chat_id=int(cid), text=txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
@@ -692,7 +755,7 @@ async def handle_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["Task ID", "Task Name", "Date", "Time", "Duration", "Status", "Recurrence", "Created At"])
+        writer.writerow(["Task ID", "Task Name", "Date", "Time", "Duration", "Status", "Recurrence", "Priority", "Created At"])
         for t in tasks:
             writer.writerow([
                 t["task_id"],
@@ -702,6 +765,7 @@ async def handle_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 t["duration"],
                 t["status"],
                 t["recurrence"],
+                t.get("priority", "Normal"),
                 t["created_at"],
             ])
 
