@@ -151,6 +151,11 @@ def _add_task_sync(chat_id, first_name, task_id, task_name, target_date, target_
             "INSERT OR IGNORE INTO users (chat_id, first_name, created_at, username) VALUES (?, ?, ?, ?)",
             (str(chat_id), str(first_name), now_str, str(username)),
         )
+        if username:
+            conn.execute(
+                "UPDATE users SET username = ? WHERE chat_id = ?",
+                (str(username), str(chat_id)),
+            )
         conn.execute(
             """
             INSERT INTO tasks (task_id, chat_id, task_name, target_date, target_time, duration, status, recurrence, priority, created_at, last_reminded_at)
@@ -464,7 +469,8 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("⚠️ Message too long — please keep it under 2000 characters.")
         return
 
-    await ensure_user(chat_id, first_name)
+    username = f"@{update.effective_user.username}" if update.effective_user.username else ""
+    await ensure_user(chat_id, first_name, username)
 
     # Custom Delay flow uses the simple, un-prompted model
     if "pending_delay_task_id" in context.user_data:
@@ -504,7 +510,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     msg_id = update.message.message_id
     tmp = os.path.join(tempfile.gettempdir(), f"voice_{chat_id}_{msg_id}.ogg")
 
-    await ensure_user(chat_id, first_name)
+    username = f"@{update.effective_user.username}" if update.effective_user.username else ""
+    await ensure_user(chat_id, first_name, username)
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
@@ -539,16 +546,17 @@ async def send_callmebot_call(username: str, task_name: str):
         return
     un = username.strip().lstrip("@")
     url = (
-        f"https://api.callmebot.com/start.php?user=%40{urllib.parse.quote(un)}"
+        f"https://api.callmebot.com/start.php?user=@{urllib.parse.quote(un)}"
         f"&text={urllib.parse.quote('Urgent reminder from Fekkarni: ' + task_name)}"
-        f"&lang=en-US-Standard-C&rpt=2"
+        f"&lang=en-GB-Standard-B&rpt=2"
     )
     try:
         def _fetch():
-            with urllib.request.urlopen(url, timeout=10) as response:
-                return response.read()
-        await asyncio.to_thread(_fetch)
-        logger.info("CallMeBot voice call initiated for @%s: %s", un, task_name)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return response.read().decode("utf-8", errors="ignore")
+        res = await asyncio.to_thread(_fetch)
+        logger.info("CallMeBot voice call initiated for @%s: %s (Response: %s)", un, task_name, res[:200])
     except Exception as e:
         logger.error("CallMeBot voice call failed for @%s: %s", un, e)
 
