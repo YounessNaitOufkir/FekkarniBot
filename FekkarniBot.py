@@ -103,9 +103,14 @@ def init_db():
                 duration TEXT,
                 status TEXT,
                 recurrence TEXT,
-                created_at TEXT
+                created_at TEXT,
+                last_reminded_at TEXT DEFAULT ''
             )
         """)
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN last_reminded_at TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.commit()
     logger.info("SQLite database initialized at %s", DB_PATH)
 
@@ -133,8 +138,8 @@ def _add_task_sync(chat_id, first_name, task_id, task_name, target_date, target_
         )
         conn.execute(
             """
-            INSERT INTO tasks (task_id, chat_id, task_name, target_date, target_time, duration, status, recurrence, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (task_id, chat_id, task_name, target_date, target_time, duration, status, recurrence, created_at, last_reminded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')
             """,
             (
                 str(task_id),
@@ -287,17 +292,35 @@ async def complete_or_cancel_tasks_by_name(chat_id, task_name, intent):
 
 
 def _get_due_reminders_sync(today_str, time_str):
+    remind_key = f"{today_str} {time_str}"
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT task_id, chat_id, task_name, duration FROM tasks WHERE status = 'Active' AND target_date = ? AND target_time = ?",
-            (str(today_str), str(time_str)),
+            """
+            SELECT task_id, chat_id, task_name, duration 
+            FROM tasks 
+            WHERE status = 'Active' 
+              AND target_date = ? 
+              AND target_time = ? 
+              AND (last_reminded_at IS NULL OR last_reminded_at != ?)
+            """,
+            (str(today_str), str(time_str), str(remind_key)),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
 async def get_due_reminders(today_str, time_str):
     return await asyncio.to_thread(_get_due_reminders_sync, str(today_str), str(time_str))
+
+
+def _mark_reminded_sync(task_id, remind_key):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE tasks SET last_reminded_at = ? WHERE task_id = ?", (str(remind_key), str(task_id)))
+        conn.commit()
+
+
+async def mark_task_reminded(task_id, remind_key):
+    await asyncio.to_thread(_mark_reminded_sync, str(task_id), str(remind_key))
 
 
 # ── SHARED PROMPT BUILDER ─────────────────────────────────────
@@ -494,6 +517,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
         snapshot_now = datetime.now(DEFAULT_TIMEZONE)
         today_s = snapshot_now.strftime("%Y-%m-%d")
         time_s = snapshot_now.strftime("%H:%M")
+        remind_key = f"{today_s} {time_s}"
 
         due_tasks = await get_due_reminders(today_s, time_s)
         for row in due_tasks:
@@ -513,7 +537,8 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     chat_id=int(cid), text=txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
                 )
-                logger.info("Fired reminder for user %s: %s", cid, tn)
+                await mark_task_reminded(tid, remind_key)
+                logger.info("Fired reminder for user %s: %s (marked %s)", cid, tn, remind_key)
             except Exception as e:
                 logger.error("Error sending reminder to %s: %s", cid, e)
     except Exception as e:
@@ -708,10 +733,9 @@ def main():
         .build()
     )
 
-    secs = 60 - datetime.now().second
     if app.job_queue:
-        app.job_queue.run_repeating(check_and_send_reminders, interval=60, first=secs)
-        logger.info("JobQueue active — clock-synchronized.")
+        app.job_queue.run_repeating(check_and_send_reminders, interval=30, first=5)
+        logger.info("JobQueue active — 30-second interval with duplicate protection.")
     else:
         logger.warning("JobQueue initialization delayed.")
 
