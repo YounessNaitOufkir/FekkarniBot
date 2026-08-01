@@ -797,21 +797,20 @@ async def handle_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_user.id)
     first_name = str(update.effective_user.first_name)
     username = f"@{update.effective_user.username}" if update.effective_user.username else ""
+    logger.info("Received /testcall from %s (%s)", chat_id, username)
     await ensure_user(chat_id, first_name, username)
 
     if not username:
         await update.message.reply_text(
-            "❌ **No Telegram Username Detected!**\n\n"
-            "CallMeBot requires a public `@username` to make calls, but your account only has a display name.\n\n"
-            "👉 **How to fix:** Go to **Telegram Settings -> My Profile -> Username**, set a username, and then try `/testcall` again!",
-            parse_mode="Markdown",
+            "❌ No Telegram Username Detected!\n\n"
+            "CallMeBot requires a public @username to make calls, but your account only has a display name.\n\n"
+            "👉 How to fix: Go to Telegram Settings -> My Profile -> Username, set a username, and then try /testcall again!"
         )
         return
 
     await update.message.reply_text(
-        f"📞 **Testing CallMeBot for {username}...**\n\n"
-        f"Sending voice call request to `api.callmebot.com` right now...",
-        parse_mode="Markdown",
+        f"📞 Testing CallMeBot for {username}...\n\n"
+        f"Sending voice call request to api.callmebot.com right now..."
     )
 
     un = username.strip().lstrip("@")
@@ -828,14 +827,13 @@ async def handle_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = await asyncio.to_thread(_fetch)
         clean_res = res.strip() if res else "No text returned"
         await update.message.reply_text(
-            f"ℹ️ **CallMeBot Server Response:**\n`{clean_res}`\n\n"
-            f"*(If the message above says 'Call in progress', your phone should ring in a few seconds! If it shows an authorization error, check that `{username}` sent `/start` to `@CallMeBot_txtbot`.)*",
-            parse_mode="Markdown",
+            f"ℹ️ CallMeBot Server Response:\n\n{clean_res}\n\n"
+            f"(If the message above says 'Call in progress', your phone should ring in a few seconds! If it shows an authorization error, check that {username} sent /start to @CallMeBot_txtbot.)"
         )
     except Exception as e:
+        logger.error("Testcall API error [%s]: %s", chat_id, e, exc_info=True)
         await update.message.reply_text(
-            f"❌ **CallMeBot API Error:**\n`{str(e)}`",
-            parse_mode="Markdown",
+            f"❌ CallMeBot API Error:\n\n{str(e)}"
         )
 
 
@@ -867,6 +865,8 @@ def main():
     app.add_handler(CommandHandler("mysheet", handle_export))
     app.add_handler(CommandHandler("sheet", handle_export))
     app.add_handler(CommandHandler("testcall", handle_testcall))
+    app.add_handler(CommandHandler("test", handle_testcall))
+    app.add_handler(CommandHandler("call", handle_testcall))
     app.add_handler(CallbackQueryHandler(handle_button_clicks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
