@@ -449,7 +449,7 @@ async def process_parsed_tasks(task_list, update: Update, context: ContextTypes.
                 elif target_upper == "TODAYS_TASKS":
                     msgs.append(f"🧹 Swept up! Marked {count} tasks for today as {new_st}.")
                 else:
-                    msgs.append(f"✅ Marked **{matched_name}** as {new_st}.")
+                    msgs.append(f"✅ Marked **{esc_md(matched_name)}** as {new_st}.")
             else:
                 msgs.append(f"❌ Couldn't find any active tasks matching '{task_name}'.")
             continue
@@ -471,7 +471,7 @@ async def process_parsed_tasks(task_list, update: Update, context: ContextTypes.
 
         if is_missing:
             context.user_data["draft_task_name"] = task_name
-            msgs.append(f"📝 I noted: **{task_name}**\n\nBut you didn't specify when! What date and time would you like?")
+            msgs.append(f"📝 I noted: **{esc_md(task_name)}**\n\nBut you didn't specify when! What date and time would you like?")
             continue
 
         username = ""
@@ -509,7 +509,7 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         try:
             mins = int(resp.text.strip())
             new_t = datetime.now(DEFAULT_TIMEZONE) + timedelta(minutes=mins)
-            await update_task_schedule(task_id, new_t.strftime("%Y-%m-%d"), new_t.strftime("%H:%M"), "Active")
+            await update_task_schedule(task_id, new_t.strftime("%Y-%m-%d"), new_t.strftime("%H:%M"), "Active", chat_id=chat_id)
             await update.message.reply_text(f"🔄 Custom delay set! Moved to {new_t.strftime('%H:%M')}.")
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
         except Exception as e:
