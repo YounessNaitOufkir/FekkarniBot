@@ -671,7 +671,7 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
                     f"⏳ **Duration:** {esc_md(dur)}\n"
                     f"🔥 **Priority:** URGENT\n\n"
                     f"📞 *Initiating Telegram Voice Call via CallMeBot...*\n"
-                    f"*(Make sure you have authorized @CallMeBot\_API in Telegram: https://api2.callmebot.com/txt/auth.php)*\n\n"
+                    f"*(Make sure you have authorized @CallMeBot\\_API in Telegram: https://api2.callmebot.com/txt/auth.php)*\n\n"
                     f"What would you like to do?"
                 )
                 if username:
@@ -943,6 +943,12 @@ async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
 # ── ENGINE RUNNER ──────────────────────────────────────────────
 def main():
     init_db()
+
+    # Python 3.14+ removed implicit event loop creation in get_event_loop()
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = (
         Application.builder()
