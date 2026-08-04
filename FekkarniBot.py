@@ -36,6 +36,12 @@ DEFAULT_TIMEZONE = pytz.timezone(os.getenv("DEFAULT_TIMEZONE", "Africa/Casablanc
 MODEL_NAME = "models/gemini-3.1-flash-lite"
 MAX_MESSAGE_LENGTH = 1000
 
+# ── STARTUP VALIDATION ────────────────────────────────────────
+if not TELEGRAM_TOKEN:
+    raise SystemExit("ERROR: TELEGRAM_TOKEN environment variable is not set. See .env.example.")
+if not GEMINI_API_KEY:
+    raise SystemExit("ERROR: GEMINI_API_KEY environment variable is not set. See .env.example.")
+
 # ── LOGGING ────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -50,13 +56,19 @@ ai_model_simple = genai.GenerativeModel(MODEL_NAME)
 
 
 # ── SECURITY SANITIZER ────────────────────────────────────────
-def sanitize_error(error_msg: Exception) -> str:
+def sanitize_error(error_msg) -> str:
+    """Redact API keys/tokens from error messages before showing to users."""
     safe = str(error_msg)
     if GEMINI_API_KEY and GEMINI_API_KEY in safe:
         safe = safe.replace(GEMINI_API_KEY, "[REDACTED_KEY]")
     if TELEGRAM_TOKEN and TELEGRAM_TOKEN in safe:
         safe = safe.replace(TELEGRAM_TOKEN, "[REDACTED_TOKEN]")
     return safe
+
+
+def esc_md(text) -> str:
+    """Escape Telegram legacy Markdown special characters in user-generated text."""
+    return re.sub(r'([_*`\[])', r'\\\1', str(text))
 
 
 # ── TASK-ID GENERATOR ─────────────────────────────────────────
@@ -219,38 +231,53 @@ async def get_all_tasks_for_user(chat_id):
     return await asyncio.to_thread(_get_all_tasks_sync, str(chat_id))
 
 
-def _get_task_sync(task_id):
+def _get_task_sync(task_id, chat_id=None):
+    """Fetch a task by ID, optionally scoped to a specific user's chat_id."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (str(task_id),)).fetchone()
+        if chat_id:
+            row = conn.execute("SELECT * FROM tasks WHERE task_id = ? AND chat_id = ?", (str(task_id), str(chat_id))).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (str(task_id),)).fetchone()
         return dict(row) if row else None
 
 
-async def get_task_by_id(task_id):
-    return await asyncio.to_thread(_get_task_sync, str(task_id))
+async def get_task_by_id(task_id, chat_id=None):
+    return await asyncio.to_thread(_get_task_sync, str(task_id), str(chat_id) if chat_id else None)
 
 
-def _update_status_sync(task_id, new_status):
+def _update_status_sync(task_id, new_status, chat_id=None):
+    """Update task status, scoped by chat_id when provided to prevent IDOR."""
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE tasks SET status = ? WHERE task_id = ?", (str(new_status), str(task_id)))
+        if chat_id:
+            conn.execute("UPDATE tasks SET status = ? WHERE task_id = ? AND chat_id = ?", (str(new_status), str(task_id), str(chat_id)))
+        else:
+            conn.execute("UPDATE tasks SET status = ? WHERE task_id = ?", (str(new_status), str(task_id)))
         conn.commit()
 
 
-async def update_task_status(task_id, new_status):
-    await asyncio.to_thread(_update_status_sync, str(task_id), str(new_status))
+async def update_task_status(task_id, new_status, chat_id=None):
+    await asyncio.to_thread(_update_status_sync, str(task_id), str(new_status), str(chat_id) if chat_id else None)
 
 
-def _update_schedule_sync(task_id, new_date, new_time, new_status):
+def _update_schedule_sync(task_id, new_date, new_time, new_status, chat_id=None):
+    """Update task schedule, scoped by chat_id when provided to prevent IDOR."""
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "UPDATE tasks SET target_date = ?, target_time = ?, status = ? WHERE task_id = ?",
-            (str(new_date), str(new_time), str(new_status), str(task_id)),
-        )
+        if chat_id:
+            conn.execute(
+                "UPDATE tasks SET target_date = ?, target_time = ?, status = ? WHERE task_id = ? AND chat_id = ?",
+                (str(new_date), str(new_time), str(new_status), str(task_id), str(chat_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE tasks SET target_date = ?, target_time = ?, status = ? WHERE task_id = ?",
+                (str(new_date), str(new_time), str(new_status), str(task_id)),
+            )
         conn.commit()
 
 
-async def update_task_schedule(task_id, new_date, new_time, new_status="Active"):
-    await asyncio.to_thread(_update_schedule_sync, str(task_id), str(new_date), str(new_time), str(new_status))
+async def update_task_schedule(task_id, new_date, new_time, new_status="Active", chat_id=None):
+    await asyncio.to_thread(_update_schedule_sync, str(task_id), str(new_date), str(new_time), str(new_status), str(chat_id) if chat_id else None)
 
 
 def _complete_or_cancel_sync(chat_id, task_name, intent):
@@ -454,7 +481,7 @@ async def process_parsed_tasks(task_list, update: Update, context: ContextTypes.
             chat_id, first_name, task_id_str, task_name, target_date, target_time, duration, "Active", recurrence, priority, username
         )
         prio_badge = " 🔥 **[URGENT]**" if priority and str(priority).lower() == "urgent" else ""
-        msgs.append(f"✅ **Saved:** {task_name} 📅 {target_date} 🕒 {target_time}{prio_badge}")
+        msgs.append(f"✅ **Saved:** {esc_md(task_name)} 📅 {target_date} 🕒 {target_time}{prio_badge}")
 
     if msgs:
         await update.message.reply_text("\n\n".join(msgs), parse_mode="Markdown")
@@ -607,7 +634,7 @@ async def send_callmebot_call(username: str, task_name: str, chat_id: str = None
             try:
                 await bot.send_message(
                     chat_id=int(chat_id),
-                    text=f"⚠️ CallMeBot Voice Call Failed:\n\n{str(e)}",
+                    text=f"⚠️ CallMeBot Voice Call Failed:\n\n{sanitize_error(e)}",
                 )
             except Exception:
                 pass
@@ -640,11 +667,11 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
             if priority and str(priority).lower() == "urgent":
                 txt = (
                     f"🚨 **URGENT REMINDER ALERT** 🚨\n\n"
-                    f"📌 **Task:** {tn}\n"
-                    f"⏳ **Duration:** {dur}\n"
+                    f"📌 **Task:** {esc_md(tn)}\n"
+                    f"⏳ **Duration:** {esc_md(dur)}\n"
                     f"🔥 **Priority:** URGENT\n\n"
                     f"📞 *Initiating Telegram Voice Call via CallMeBot...*\n"
-                    f"*(Make sure you have authorized @CallMeBot_API in Telegram: https://api2.callmebot.com/txt/auth.php)*\n\n"
+                    f"*(Make sure you have authorized @CallMeBot\_API in Telegram: https://api2.callmebot.com/txt/auth.php)*\n\n"
                     f"What would you like to do?"
                 )
                 if username:
@@ -652,8 +679,8 @@ async def check_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
             else:
                 txt = (
                     f"⏰ **REMINDER ALERT** ⏰\n\n"
-                    f"📌 **Task:** {tn}\n"
-                    f"⏳ **Duration:** {dur}\n\n"
+                    f"📌 **Task:** {esc_md(tn)}\n"
+                    f"⏳ **Duration:** {esc_md(dur)}\n\n"
                     f"What would you like to do?"
                 )
             try:
@@ -679,7 +706,7 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
     first_name = str(update.effective_user.first_name)
     await ensure_user(chat_id, first_name)
 
-    task = await get_task_by_id(task_id)
+    task = await get_task_by_id(task_id, chat_id=chat_id)
     if not task:
         await query.edit_message_text("❌ Sync error — task no longer exists in dashboard.")
         return
@@ -709,19 +736,19 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 nxt = cur_date + timedelta(days=1)
 
-            await update_task_schedule(task_id, nxt.strftime("%Y-%m-%d"), str(task.get("target_time", "00:00")), "Active")
+            await update_task_schedule(task_id, nxt.strftime("%Y-%m-%d"), str(task.get("target_time", "00:00")), "Active", chat_id=chat_id)
             await query.edit_message_text(f"{encouragement} Rescheduled for {nxt.strftime('%Y-%m-%d')}.")
         else:
-            await update_task_status(task_id, "Completed")
+            await update_task_status(task_id, "Completed", chat_id=chat_id)
             await query.edit_message_text(encouragement)
 
     elif action == "cancel":
-        await update_task_status(task_id, "Cancelled")
+        await update_task_status(task_id, "Cancelled", chat_id=chat_id)
         await query.edit_message_text("❌ Task has been cancelled.")
 
     elif action == "snooze":
         new_t = datetime.now(DEFAULT_TIMEZONE) + timedelta(minutes=30)
-        await update_task_schedule(task_id, new_t.strftime("%Y-%m-%d"), new_t.strftime("%H:%M"), "Active")
+        await update_task_schedule(task_id, new_t.strftime("%Y-%m-%d"), new_t.strftime("%H:%M"), "Active", chat_id=chat_id)
         await query.edit_message_text(f"⏳ Snoozed 30 min. New target: {new_t.strftime('%H:%M')}")
 
     elif action == "delay":
@@ -758,7 +785,7 @@ async def handle_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tm = t.get("target_time", "No Time")
             n = t.get("task_name", "Untitled")
             prefix = f"[{d}] " if "Full Agenda" in title else ""
-            txt += f"• {prefix}**{tm}** - {n}\n"
+            txt += f"• {prefix}**{tm}** - {esc_md(n)}\n"
 
         await update.message.reply_text(txt, parse_mode="Markdown")
     except Exception as e:
@@ -895,8 +922,22 @@ async def handle_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error("Testcall API error [%s]: %s", chat_id, e, exc_info=True)
         await update.message.reply_text(
-            f"❌ CallMeBot API Error:\n\n{str(e)}"
+            f"❌ CallMeBot API Error:\n\n{sanitize_error(e)}"
         )
+
+
+# ── GLOBAL ERROR HANDLER ──────────────────────────────────────
+async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """Catch unhandled exceptions so reminders and commands never fail silently."""
+    logger.error("Unhandled exception: %s", context.error, exc_info=context.error)
+    if update and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"⚠️ An unexpected error occurred: {sanitize_error(context.error)}",
+            )
+        except Exception:
+            pass
 
 
 # ── ENGINE RUNNER ──────────────────────────────────────────────
@@ -932,6 +973,8 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_button_clicks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+
+    app.add_error_handler(global_error_handler)
 
     logger.info("Bot fully initialized — starting polling...")
     app.run_polling()

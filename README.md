@@ -2,11 +2,11 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4.svg?logo=telegram)](https://core.telegram.org/bots/api)
-[![Google Gemini AI](https://img.shields.io/badge/AI-Google%20Gemini%201.5%20Flash-orange.svg)](https://aistudio.google.com/)
+[![Google Gemini AI](https://img.shields.io/badge/AI-Google%20Gemini%203.1%20Flash%20Lite-orange.svg)](https://aistudio.google.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Deploy on Render](https://img.shields.io/badge/Deploy-Render-46E3B7.svg)](https://render.com/)
 
-**FekkarniBot** (from Moroccan Arabic فكرني *"Remind me"*) is a state-of-the-art AI memory and task assistant built on Telegram. Using **Google Gemini 1.5 Flash**, it understands text messages and voice notes in **English, Arabic, Darija, and French**, automatically parsing dates, times, durations, and priorities to keep your life organized.
+**FekkarniBot** (from Moroccan Arabic فكرني *"Remind me"*) is a state-of-the-art AI memory and task assistant built on Telegram. Using **Google Gemini 3.1 Flash Lite**, it understands text messages and voice notes in **English, Arabic, Darija, and French**, automatically parsing dates, times, durations, and priorities to keep your life organized.
 
 ---
 
@@ -36,11 +36,11 @@ If you are a regular user and want to use FekkarniBot right away:
 
 ```
    ┌──────────────┐         ┌───────────────┐         ┌─────────────────────────┐
-   │ Telegram App │ ──────> │ FekkarniBot   │ ──────> │ Google Gemini 1.5 Flash │
-   │ (Text/Voice) │ <────── │ (python-telegram│ <────── │ (AI Task Parser & NLP)  │
+   │ Telegram App │ ──────> │ FekkarniBot   │ ──────> │ Google Gemini 3.1       │
+   │ (Text/Voice) │ <────── │ (python-telegram│ <────── │ Flash Lite (AI Parser)  │
    └──────────────┘         └───────────────┘         └─────────────────────────┘
           ▲                         │
-          │ (Urgent Voice Calls)    ├── (SQLite WAL) ──> ./fekkarni.db (User Tasks)
+          │ (Urgent Voice Calls)    ├── (SQLite) ──> ./fekkarni.db (User Tasks)
           │                         │
    ┌──────────────┐                 ▼
    │ CallMeBot    │ <─────── Async Scheduler (30s Polling & Rate-Limit Alerts)
