@@ -2,6 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4.svg?logo=telegram)](https://core.telegram.org/bots/api)
+[![CallMeBot](https://img.shields.io/badge/Voice%20Calls-CallMeBot-25D366.svg)](https://www.callmebot.com/)
 [![Google Gemini AI](https://img.shields.io/badge/AI-Google%20Gemini%203.1%20Flash%20Lite-orange.svg)](https://aistudio.google.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Deploy on Render](https://img.shields.io/badge/Deploy-Render-46E3B7.svg)](https://render.com/)
