@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import urllib.request
 import urllib.parse
-import requests
 
 import pytz
 import sqlite3
@@ -78,7 +77,7 @@ def generate_task_id() -> str:
 
 
 # ── DUMMY KEEP-ALIVE SERVER ───────────────────────────────────
-def run_dummy_server(bot_app=None):
+def run_dummy_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -89,38 +88,14 @@ def run_dummy_server(bot_app=None):
             self.send_response(200)
             self.end_headers()
 
-        def do_POST(self):
-            if self.path == '/webhook':
-                content_length = int(self.headers.get('Content-Length', 0))
-                post_data = self.rfile.read(content_length)
-                try:
-                    payload = json.loads(post_data.decode('utf-8'))
-                    chat_id = payload.get('chat_id')
-                    message = payload.get('message')
-                    if bot_app and chat_id and message:
-                        # Must run threadsafe because dummy server is a separate thread
-                        # from the python-telegram-bot asyncio event loop
-                        asyncio.run_coroutine_threadsafe(
-                            bot_app.bot.send_message(chat_id=chat_id, text=message),
-                            bot_app.loop
-                        )
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b"OK")
-                except Exception as e:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(str(e).encode('utf-8'))
-            else:
-                self.send_response(404)
-                self.end_headers()
-
         def log_message(self, fmt, *args):
             pass  # suppress noisy HTTP logs
 
     port = int(os.environ.get("PORT", 10000))
-    logger.info("Keep-alive & Webhook server on port %s", port)
+    logger.info("Keep-alive server on port %s", port)
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 
 # ── SQLITE LOCAL DATABASE LAYER (OPTION 2) ─────────────────────
@@ -966,36 +941,6 @@ async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── ENGINE RUNNER ──────────────────────────────────────────────
-
-async def handle_addhostflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Adds a task directly to HostFlow via API"""
-    chat_id = str(update.effective_chat.id)
-    text = " ".join(context.args) if context.args else ""
-    
-    if not text:
-        await update.message.reply_text("Usage: /addhostflow <task name>")
-        return
-        
-    hostflow_url = os.getenv("HOSTFLOW_URL", "http://localhost:3000")
-    api_key = os.getenv("HOSTFLOW_API_KEY")
-    
-    if not api_key:
-        await update.message.reply_text("Error: HOSTFLOW_API_KEY is not set in .env")
-        return
-        
-    try:
-        response = requests.post(
-            f"{hostflow_url}/api/v1/tasks",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={"task_name": text, "chat_id": chat_id}
-        )
-        if response.status_code == 200:
-            await update.message.reply_text(f"✅ Successfully added '{text}' to HostFlow!")
-        else:
-            await update.message.reply_text(f"❌ Failed to add to HostFlow. Status: {response.status_code}\n{response.text}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error contacting HostFlow: {e}")
-
 def main():
     init_db()
 
@@ -1014,9 +959,6 @@ def main():
         .pool_timeout(30)
         .build()
     )
-    
-    # Start the server thread here so it has access to `app`
-    threading.Thread(target=run_dummy_server, args=(app,), daemon=True).start()
 
     if app.job_queue:
         app.job_queue.run_repeating(check_and_send_reminders, interval=30, first=5)
@@ -1026,7 +968,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))  
-    app.add_handler(CommandHandler("addhostflow", handle_addhostflow))
     app.add_handler(CommandHandler("agenda", handle_agenda))
     app.add_handler(CommandHandler("today", handle_agenda))
     app.add_handler(CommandHandler("export", handle_export))
